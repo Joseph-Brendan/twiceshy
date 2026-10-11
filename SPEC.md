@@ -212,7 +212,14 @@ When a guarded call arrives, Twiceshy reads the existing record for its identity
 - The tool returned normally → `SUCCEEDED`, store the result.
 - The tool threw or returned an error → classify it (C7). Definite → `FAILED_DEFINITE`. Ambiguous → `IN_DOUBT`.
 - The caller cancelled the call while it was running → `IN_DOUBT`, because the tool may already have acted.
-- A result arrives **after** Twiceshy marked the record `IN_DOUBT` because of a timeout → upgrade to `SUCCEEDED` or `FAILED_DEFINITE` and emit a `late-completion` event. This turns many in-doubt cases into clean answers without a human.
+- A result arrives **after** Twiceshy marked the record `IN_DOUBT`, because of a timeout or because another process saw the lease expire → upgrade to `SUCCEEDED` or `FAILED_DEFINITE` and emit a `late-completion` event. This turns many in-doubt cases into clean answers without a human.
+- When an action finishes, the guard re-reads its record. If the record is still `IN_FLIGHT` and still owned by this call, it applies the normal after-execution rules. If anything else changed it, it must use the late-completion path. It must never overwrite a state set by another process or by a human.
+
+**Edge rules decided during Phase 1:**
+
+- A `SUCCEEDED` record with no completion time counts as inside the window. Blocking is the safe direction. Stores must make this impossible in practice: `complete()` always sets `completedAt`, and the store contract suite tests it.
+- Repeat grants are checked after the window. If the window has passed, the action runs as a new action and any unused grant is cleared. Inside the window, a grant allows one execution and is then consumed.
+- A record in a state the engine does not recognise throws `STORE_UNAVAILABLE`, not a plain error. Its `why` explains that the database may be corrupted or written by a newer Twiceshy version. Its `fix` says to upgrade, or to inspect the record with `twiceshy show`.
 
 **Lease:** default lease is `timeoutMs + 30 s`. While the action runs, Twiceshy renews the lease every `leaseMs / 3`. A crashed process stops renewing, so its lease expires.
 
@@ -220,12 +227,12 @@ When a guarded call arrives, Twiceshy reads the existing record for its identity
 
 ### C7. Classifying failures
 
-The default classifier, `classifyError(error) → 'definite' | 'ambiguous'`:
+The default classifier is `classifyError(error, options) → { classification: 'definite' | 'ambiguous', warning?: string }`. It returns an object, not a bare value, so it can report a misbehaving custom classifier through `warning` without ever throwing.
 
 **Definite:**
-- Zod or JSON schema validation errors raised before the tool runs.
+- Zod validation errors, detected by `instanceof` or by the error name `ZodError` (to handle duplicate Zod copies). Other validation libraries are not detected by name, because generic names like `ValidationError` collide with unrelated libraries. Mark those errors with `definiteFailure` or use a custom classifier.
 - MCP protocol errors for unknown tool or invalid params (JSON-RPC error codes `-32601` and `-32602`).
-- HTTP errors that carry status 400, 401, 403, 404, 409, 422, when the error object exposes a status.
+- HTTP errors that carry status 400, 401, 403, 404, 409, 422. The status is read from `status`, `statusCode`, or `response.status`, as a number or a three-digit string.
 - Errors marked by the developer with `definiteFailure(error)`, a helper the library exports.
 
 **Ambiguous, everything else, including:**
@@ -237,7 +244,7 @@ The default classifier, `classifyError(error) → 'definite' | 'ambiguous'`:
 
 **Why unknown means ambiguous:** a wrong "definite" answer allows a duplicate charge. A wrong "ambiguous" answer causes one blocked action that a human clears in a minute. The second mistake is far cheaper, so the default leans that way. Developers can pass their own classifier for tools whose errors they understand.
 
-**MCP `isError: true` results:** when a downstream MCP tool returns a result with `isError: true`, the tool ran and reported failure. Many such tools fail before doing anything, but Twiceshy cannot know. Default: ambiguous. Config option `treatToolErrorsAsDefinite` (per server or per tool) lets teams opt in once they know their server's behaviour.
+**MCP `isError: true` results:** when a downstream MCP tool returns a result with `isError: true`, the tool ran and reported failure. Many such tools fail before doing anything, but Twiceshy cannot know. Default: ambiguous. Config option `treatToolErrorsAsDefinite` (per server or per tool) lets teams opt in once they know their server's behaviour. `classifyToolResult` returns `null` when `isError` is not `true`, because there is nothing to classify, and returns `'ambiguous'` if reading the result throws.
 
 ### C8. What callers receive
 

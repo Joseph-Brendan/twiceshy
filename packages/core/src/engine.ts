@@ -1,3 +1,5 @@
+import { StoreUnavailableError } from './errors.js';
+
 /**
  * The C6 decision engine, as pure functions only.
  *
@@ -22,6 +24,8 @@ export interface RepeatGrant {
 
 /** The fields of an action record the engine reasons about. */
 export interface EngineRecord {
+  /** Store-assigned id, used to name the record in error messages. */
+  id?: string;
   fingerprint: string;
   state: RecordState;
   attempt: number;
@@ -85,9 +89,19 @@ export type ExecutionOutcome =
   | { type: 'ambiguous-failure' }
   | { type: 'cancelled' };
 
-/** Compile-time exhaustiveness check: adding a case becomes a type error. */
-function assertNever(value: never): never {
-  throw new Error(`Unhandled value: ${String(value)}`);
+/**
+ * The defensive never check. A stored record in a state this engine does not
+ * recognise means the database may be corrupted or written by a newer
+ * Twiceshy version, so the safe move is to refuse with STORE_UNAVAILABLE
+ * rather than guess. The same applies to an unknown execution outcome.
+ */
+function unhandledEngineValue(subject: string, value: unknown, recordId?: string): never {
+  throw new StoreUnavailableError({
+    ...(recordId === undefined ? {} : { recordId }),
+    what: `The engine received an unknown ${subject}: ${String(value)}.`,
+    why: 'The stored record has an unknown state, possibly from database corruption or from a newer Twiceshy version.',
+    fix: 'Upgrade Twiceshy, or inspect the record with `twiceshy show`.',
+  });
 }
 
 /** The lease deadline for a claim that starts at `now`. */
@@ -184,7 +198,7 @@ export function decide(
     case 'IN_DOUBT':
       return { kind: 'block-in-doubt', changes: {} };
     default:
-      return assertNever(existing.state);
+      return unhandledEngineValue('record state', existing.state, existing.id);
   }
 }
 
@@ -194,7 +208,7 @@ export function decide(
  * the record IN_DOUBT. Returns the patch to persist.
  */
 export function afterExecution(
-  _record: EngineRecord,
+  record: EngineRecord,
   outcome: ExecutionOutcome,
   now: Date,
   _settings: EngineSettings,
@@ -213,7 +227,11 @@ export function afterExecution(
     case 'cancelled':
       return { state: 'IN_DOUBT', leaseUntil: null };
     default:
-      return assertNever(outcome);
+      return unhandledEngineValue(
+        'execution outcome',
+        (outcome as { type?: unknown }).type,
+        record.id,
+      );
   }
 }
 
@@ -244,6 +262,10 @@ export function lateCompletion(
     case 'cancelled':
       return {};
     default:
-      return assertNever(outcome);
+      return unhandledEngineValue(
+        'completion outcome',
+        (outcome as { type?: unknown }).type,
+        record.id,
+      );
   }
 }

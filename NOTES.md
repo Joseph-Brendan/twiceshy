@@ -14,3 +14,8 @@ When a guarded call arrives, Twiceshy finds the record for that action, by expli
 - A person can grant one repeat, which allows exactly one extra execution.
 
 If a result arrives after a timeout, Twiceshy upgrades "in doubt" to succeeded or failed when it can, so no human is needed.
+
+## Rules for Phase 2
+
+- The store contract suite must include a test proving `complete()` always sets `completedAt`, for every terminal state.
+- When an action finishes, the guard must re-read its record. If the record is no longer `IN_FLIGHT`, or is not owned by this call, it must use `lateCompletion`, never `afterExecution`. It must never overwrite a state set by another process or by a human. Phase 2 needs a test where a lease expires mid-action, another caller marks the record `IN_DOUBT`, and the original call then finishes and upgrades the record through `lateCompletion`.

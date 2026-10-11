@@ -12,6 +12,8 @@ import {
   lateCompletion,
   leaseExpired,
   nextLeaseExpiry,
+  StoreUnavailableError,
+  TwiceshyError,
 } from '../src/index.js';
 
 const NOW = new Date('2026-01-01T12:00:00.000Z');
@@ -24,6 +26,7 @@ const REQUEST = { fingerprint: 'fp-1' };
 
 function makeRecord(overrides: Partial<EngineRecord> = {}): EngineRecord {
   return {
+    id: 'rec-1',
     fingerprint: 'fp-1',
     state: 'SUCCEEDED',
     attempt: 1,
@@ -33,6 +36,26 @@ function makeRecord(overrides: Partial<EngineRecord> = {}): EngineRecord {
     repeatGrant: null,
     ...overrides,
   };
+}
+
+function captureError(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
+function expectStoreUnavailable(error: unknown, recordId: string | undefined): void {
+  expect(error).toBeInstanceOf(TwiceshyError);
+  expect(error).toBeInstanceOf(StoreUnavailableError);
+  const storeError = error as StoreUnavailableError;
+  expect(storeError.code).toBe('STORE_UNAVAILABLE');
+  expect(storeError.recordId).toBe(recordId);
+  expect(storeError.what.trim().length).toBeGreaterThan(0);
+  expect(storeError.why.trim().length).toBeGreaterThan(0);
+  expect(storeError.fix.trim().length).toBeGreaterThan(0);
 }
 
 interface TableRow {
@@ -295,9 +318,16 @@ describe('decide', () => {
     ).toBe('reject-key-conflict');
   });
 
-  it('decide throws for an unknown stored state (defensive never check)', () => {
-    const corrupt = makeRecord({ state: 'BANANA' as RecordState });
-    expect(() => decide(corrupt, REQUEST, NOW, SETTINGS)).toThrow(/Unhandled/);
+  it('decide throws STORE_UNAVAILABLE with what, why, and fix for an unknown stored state', () => {
+    const corrupt = makeRecord({ id: 'rec-corrupt', state: 'BANANA' as RecordState });
+    const error = captureError(() => decide(corrupt, REQUEST, NOW, SETTINGS));
+    expectStoreUnavailable(error, 'rec-corrupt');
+  });
+
+  it('the unknown-state error works when the record has no id', () => {
+    const corrupt = makeRecord({ id: undefined, state: 'BANANA' as RecordState });
+    const error = captureError(() => decide(corrupt, REQUEST, NOW, SETTINGS));
+    expectStoreUnavailable(error, undefined);
   });
 });
 
@@ -350,15 +380,16 @@ describe('afterExecution', () => {
     expect(patch.leaseUntil).toBeNull();
   });
 
-  it('afterExecution throws for an unknown outcome type (defensive never check)', () => {
-    expect(() =>
+  it('afterExecution throws STORE_UNAVAILABLE with what, why, and fix for an unknown outcome type', () => {
+    const error = captureError(() =>
       afterExecution(
-        makeRecord(),
+        makeRecord({ id: 'rec-after' }),
         { type: 'banana' } as unknown as ExecutionOutcome,
         NOW,
         SETTINGS,
       ),
-    ).toThrow(/Unhandled/);
+    );
+    expectStoreUnavailable(error, 'rec-after');
   });
 });
 
@@ -390,14 +421,15 @@ describe('lateCompletion', () => {
     expect(lateCompletion(succeeded, { type: 'success', result: 1 }, NOW)).toEqual({});
   });
 
-  it('lateCompletion throws for an unknown outcome type (defensive never check)', () => {
-    expect(() =>
+  it('lateCompletion throws STORE_UNAVAILABLE with what, why, and fix for an unknown outcome type', () => {
+    const error = captureError(() =>
       lateCompletion(
-        makeRecord({ state: 'IN_DOUBT' }),
+        makeRecord({ id: 'rec-late', state: 'IN_DOUBT' }),
         { type: 'banana' } as unknown as ExecutionOutcome,
         NOW,
       ),
-    ).toThrow(/Unhandled/);
+    );
+    expectStoreUnavailable(error, 'rec-late');
   });
 });
 
