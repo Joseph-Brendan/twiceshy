@@ -1,0 +1,249 @@
+/**
+ * The C6 decision engine, as pure functions only.
+ *
+ * Nothing in this module reads the clock, touches a database, or performs
+ * I/O. Time always arrives as a `now: Date` parameter, so every decision is
+ * deterministic and can be tested exhaustively. Stores call these functions
+ * inside their atomic transactions and persist the returned patches.
+ */
+
+export type RecordState =
+  | 'IN_FLIGHT'
+  | 'SUCCEEDED'
+  | 'FAILED_DEFINITE'
+  | 'IN_DOUBT'
+  | 'RESOLVED_SUCCEEDED'
+  | 'RESOLVED_FAILED';
+
+/** A human-approved repeat that has not been consumed yet. */
+export interface RepeatGrant {
+  grantedAt: Date;
+}
+
+/** The fields of an action record the engine reasons about. */
+export interface EngineRecord {
+  fingerprint: string;
+  state: RecordState;
+  attempt: number;
+  /** Lease deadline while IN_FLIGHT; null otherwise. */
+  leaseUntil: Date | null;
+  /** When the action finished, when known. */
+  completedAt: Date | null;
+  /** Stored result for a successful action. */
+  result: unknown;
+  /** Set by allowRepeat; consumed by the next execution. */
+  repeatGrant: RepeatGrant | null;
+}
+
+/** The changes a decision asks the store to apply. */
+export interface RecordPatch {
+  state?: RecordState;
+  attempt?: number;
+  leaseUntil?: Date | null;
+  completedAt?: Date | null;
+  result?: unknown;
+  repeatGrant?: RepeatGrant | null;
+}
+
+export interface EngineSettings {
+  /** How long after completion an identical action counts as a duplicate. */
+  windowMs: number;
+  /** How long a second caller waits for an IN_FLIGHT action. */
+  waitForInFlightMs: number;
+  /** Claim duration; callers pass timeoutMs + 30s. */
+  leaseMs: number;
+}
+
+export interface DecisionRequest {
+  fingerprint: string;
+  /** Present when the caller supplied an explicit key as the identity. */
+  explicitKey?: string;
+}
+
+export type DecisionKind =
+  | 'execute'
+  | 'duplicate'
+  | 'wait'
+  | 'block-in-doubt'
+  | 'reject-key-conflict';
+
+export type Decision =
+  | { kind: 'execute'; changes: RecordPatch; archiveExisting: boolean }
+  | {
+      kind: 'duplicate';
+      changes: RecordPatch;
+      originalResult: unknown;
+      originalAt: Date | null;
+    }
+  | { kind: 'wait'; changes: RecordPatch; waitMs: number }
+  | { kind: 'block-in-doubt'; changes: RecordPatch }
+  | { kind: 'reject-key-conflict'; changes: RecordPatch };
+
+export type ExecutionOutcome =
+  | { type: 'success'; result: unknown }
+  | { type: 'definite-failure' }
+  | { type: 'ambiguous-failure' }
+  | { type: 'cancelled' };
+
+/** Compile-time exhaustiveness check: adding a case becomes a type error. */
+function assertNever(value: never): never {
+  throw new Error(`Unhandled value: ${String(value)}`);
+}
+
+/** The lease deadline for a claim that starts at `now`. */
+export function nextLeaseExpiry(now: Date, settings: EngineSettings): Date {
+  return new Date(now.getTime() + settings.leaseMs);
+}
+
+/** True when the record's lease is missing or no longer valid at `now`. */
+export function leaseExpired(record: EngineRecord, now: Date): boolean {
+  return record.leaseUntil === null || record.leaseUntil.getTime() <= now.getTime();
+}
+
+function hasActiveGrant(record: EngineRecord): boolean {
+  return record.repeatGrant !== null;
+}
+
+function isInsideWindow(record: EngineRecord, now: Date, windowMs: number): boolean {
+  if (record.completedAt === null) {
+    // Completion time unknown: treat as a duplicate, the safe direction.
+    return true;
+  }
+  return now.getTime() - record.completedAt.getTime() < windowMs;
+}
+
+function startAttempt(attempt: number, now: Date, settings: EngineSettings): RecordPatch {
+  return {
+    state: 'IN_FLIGHT',
+    attempt,
+    leaseUntil: nextLeaseExpiry(now, settings),
+    completedAt: null,
+    result: undefined,
+  };
+}
+
+/**
+ * Implements every row of the C6 decision table and returns a typed decision
+ * plus the record patch to apply. Never mutates `existing`.
+ */
+export function decide(
+  existing: EngineRecord | null,
+  request: DecisionRequest,
+  now: Date,
+  settings: EngineSettings,
+): Decision {
+  if (
+    existing !== null &&
+    request.explicitKey !== undefined &&
+    existing.fingerprint !== request.fingerprint
+  ) {
+    return { kind: 'reject-key-conflict', changes: {} };
+  }
+  if (existing === null) {
+    return { kind: 'execute', changes: startAttempt(1, now, settings), archiveExisting: false };
+  }
+  switch (existing.state) {
+    case 'SUCCEEDED':
+    case 'RESOLVED_SUCCEEDED': {
+      if (!isInsideWindow(existing, now, settings.windowMs)) {
+        return {
+          kind: 'execute',
+          changes: { ...startAttempt(1, now, settings), repeatGrant: null },
+          archiveExisting: true,
+        };
+      }
+      if (hasActiveGrant(existing)) {
+        return {
+          kind: 'execute',
+          changes: { ...startAttempt(existing.attempt + 1, now, settings), repeatGrant: null },
+          archiveExisting: false,
+        };
+      }
+      return {
+        kind: 'duplicate',
+        changes: {},
+        originalResult: existing.result,
+        originalAt: existing.completedAt,
+      };
+    }
+    case 'IN_FLIGHT':
+      if (leaseExpired(existing, now)) {
+        return {
+          kind: 'block-in-doubt',
+          changes: { state: 'IN_DOUBT', leaseUntil: null },
+        };
+      }
+      return { kind: 'wait', changes: {}, waitMs: settings.waitForInFlightMs };
+    case 'FAILED_DEFINITE':
+    case 'RESOLVED_FAILED':
+      return {
+        kind: 'execute',
+        changes: startAttempt(existing.attempt + 1, now, settings),
+        archiveExisting: false,
+      };
+    case 'IN_DOUBT':
+      return { kind: 'block-in-doubt', changes: {} };
+    default:
+      return assertNever(existing.state);
+  }
+}
+
+/**
+ * Implements the C6 "after execution" rules: success stores the result,
+ * definite failure is safe to retry, ambiguous failure and cancellation leave
+ * the record IN_DOUBT. Returns the patch to persist.
+ */
+export function afterExecution(
+  _record: EngineRecord,
+  outcome: ExecutionOutcome,
+  now: Date,
+  _settings: EngineSettings,
+): RecordPatch {
+  switch (outcome.type) {
+    case 'success':
+      return { state: 'SUCCEEDED', completedAt: now, leaseUntil: null, result: outcome.result };
+    case 'definite-failure':
+      return {
+        state: 'FAILED_DEFINITE',
+        completedAt: now,
+        leaseUntil: null,
+        result: undefined,
+      };
+    case 'ambiguous-failure':
+    case 'cancelled':
+      return { state: 'IN_DOUBT', leaseUntil: null };
+    default:
+      return assertNever(outcome);
+  }
+}
+
+/**
+ * A result that arrives after the record was marked IN_DOUBT upgrades it to
+ * SUCCEEDED or FAILED_DEFINITE. Callers emit the late-completion event when
+ * the returned patch is not empty.
+ */
+export function lateCompletion(
+  record: EngineRecord,
+  outcome: ExecutionOutcome,
+  now: Date,
+): RecordPatch {
+  if (record.state !== 'IN_DOUBT') {
+    return {};
+  }
+  switch (outcome.type) {
+    case 'success':
+      return { state: 'SUCCEEDED', completedAt: now, leaseUntil: null, result: outcome.result };
+    case 'definite-failure':
+      return {
+        state: 'FAILED_DEFINITE',
+        completedAt: now,
+        leaseUntil: null,
+        result: undefined,
+      };
+    case 'ambiguous-failure':
+    case 'cancelled':
+      return {};
+    default:
+      return assertNever(outcome);
+  }
+}

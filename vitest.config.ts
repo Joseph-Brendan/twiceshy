@@ -20,7 +20,19 @@ export default defineConfig({
           functions: 100,
           statements: 100,
         },
+        'packages/core/src/classify.ts': {
+          lines: 100,
+          branches: 100,
+          functions: 100,
+          statements: 100,
+        },
         'packages/core/src/duration.ts': {
+          lines: 100,
+          branches: 100,
+          functions: 100,
+          statements: 100,
+        },
+        'packages/core/src/engine.ts': {
           lines: 100,
           branches: 100,
           functions: 100,
