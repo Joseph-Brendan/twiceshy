@@ -17,6 +17,9 @@ jobs:
         node-version: [22, 24]
 
     steps:
+      - name: Configure git autocrlf
+        run: git config --global core.autocrlf false
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
