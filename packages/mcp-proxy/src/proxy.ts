@@ -180,7 +180,7 @@ export function duplicateResult(
   return { ...withMeta, content: [{ type: 'text', text: note }, ...original.content] };
 }
 
-function createActionStore(config: ProxyConfig['store'], logger: Logger): ActionStore {
+export function createActionStore(config: ProxyConfig['store'], logger: Logger): ActionStore {
   if (config.type === 'sqlite') {
     logger.info(`using SQLite store at ${config.path}`);
     return new SqliteStore({ path: config.path });
@@ -193,7 +193,7 @@ function toolOptionsFor(config: ProxyConfig, serverName: string, toolName: strin
 }
 
 /** Narrows SDK annotations (optional-with-undefined) to the core guard's shape. */
-function guardAnnotations(tool: Tool): GuardToolAnnotations | null {
+export function guardAnnotations(tool: Tool): GuardToolAnnotations | null {
   const annotations = tool.annotations;
   if (annotations === undefined || annotations === null) {
     return null;

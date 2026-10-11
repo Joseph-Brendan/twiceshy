@@ -179,6 +179,7 @@ class ManagedConnection implements DownstreamConnection {
   private scheduler: RestartScheduler | null = null;
   private closed = false;
   private restarting = false;
+  private connectedOnce = false;
 
   constructor(
     name: string,
@@ -200,7 +201,14 @@ class ManagedConnection implements DownstreamConnection {
     failures: DownstreamFailure[],
   ): Promise<ManagedConnection> {
     const connection = new ManagedConnection(name, config, options, failures);
-    await connection.connect();
+    try {
+      await connection.connect();
+    } catch (error) {
+      // A startup failure is reported, not restarted (C13). Close the
+      // half-built connection so no backoff timer lingers behind it.
+      await connection.close();
+      throw error;
+    }
     return connection;
   }
 
@@ -242,6 +250,7 @@ class ManagedConnection implements DownstreamConnection {
     this.status = 'connected';
     this.failure = null;
     this.restarting = false;
+    this.connectedOnce = true;
     this.options.logger
       .child(this.name)
       .info(
@@ -281,7 +290,9 @@ class ManagedConnection implements DownstreamConnection {
   }
 
   private handleTransportClose(): void {
-    if (this.closed || this.restarting) {
+    // Before the first successful connect, a close is a startup failure that
+    // the caller reports; there is nothing to restart yet.
+    if (this.closed || this.restarting || !this.connectedOnce) {
       return;
     }
     this.beginRestart();

@@ -1,0 +1,19 @@
+example       connected   6 tools
+  create_refund       GUARDED    (config: guard true)
+  WARNING create_refund: no keyFields are set and "reason" is free text, so a
+  retry with rephrased text looks like a new action and can slip through; set
+  keyFields to the fields that define the action.
+  list_transactions   open       (config: guard false)
+  get_balance         open       (annotation: readOnlyHint)
+  upsert              open       (annotation: idempotentHint (trusted))
+  leave_message       GUARDED    (no annotation, default)
+  WARNING leave_message: no keyFields are set and "note", "message" are free
+  text, so a retry with rephrased text looks like a new action and can slip
+  through; set keyFields to the fields that define the action.
+  noop                GUARDED    (no annotation, default)
+broken        FAILED      The downstream MCP server "broken" is unavailable.
+              Why: Twiceshy could not connect to the server, or the connection
+              dropped while calling it.
+              Fix: Check the server command or URL in config.
+
+records in doubt: 0
