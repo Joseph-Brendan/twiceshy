@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "twiceshy": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@twiceshy/mcp-proxy",
+        "--config",
+        "/absolute/path/to/twiceshy/examples/proxy-claude-config/twiceshy.config.json"
+      ]
+    }
+  }
+}

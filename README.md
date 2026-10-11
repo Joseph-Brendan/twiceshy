@@ -1,39 +1,45 @@
 # Twiceshy
 
-**Twiceshy is a zero-setup, local-first repeat-action guard for AI agents that stops duplicate side effects (refunds, payments, messages, bookings) before they reach the real world.**
+Twiceshy is a repeat-action guard for AI agents. It makes sure the same refund, transfer, message, or booking does not happen twice when an agent retries.
 
-### The Kola Scenario
+The Kola scenario, in four lines:
 
-> Kola runs a food delivery app in Lagos. His refund agent sends a ₦1,500 refund to a customer, Ife, through Paystack. Paystack is slow that afternoon, so the agent's request times out after 30 seconds. The refund had actually gone through, but the agent retries. Ife receives ₦3,000.
-> 
-> Twiceshy sits between the agent and tools to stop this exact duplicate execution.
+1. Kola runs a food delivery app in Lagos. His refund agent sends Ife a 1,500 naira refund through Paystack.
+2. Paystack is slow, so the request times out, even though the refund went through.
+3. The agent retries, and Ife receives 3,000 naira.
+4. Twiceshy records the first refund, blocks the retry, and asks a person when it cannot tell what happened.
 
----
+**Twiceshy protects one machine.** The SQLite store works for agents on a single computer or server. Teams running agents on several servers need the future Redis or Postgres store. See [Limits](docs/limits.md).
 
-## 30-Second Quickstart
+## Pick the right package in under a minute
 
-### 1. Library (`twiceshy`)
+- Choose **`twiceshy`** if you write your own tool functions in TypeScript or JavaScript and want to protect them. You call `wrap` around your refund, transfer, message, or booking function.
+- Choose **`@twiceshy/mcp-proxy`** if your tools already speak MCP and you do not want to change their code. You add one entry to your MCP client config and point the agent at the proxy.
+
+Both packages share the same guard and the same record store. You can start with one and add the other later.
+
+## Quick start: the library
 
 ```bash
 npm install twiceshy
 ```
 
-```ts
-import { createGuard } from 'twiceshy';
+```js
+import { createGuard, MemoryStore } from 'twiceshy';
 
-const guard = createGuard();
-
-const safeRefund = guard.wrap('refund', paystackRefund, {
+const guard = createGuard({ store: new MemoryStore(), window: '10m' });
+const refund = guard.wrap('paystack.refund', paystackRefund, {
   keyFields: ['transaction', 'amount'],
 });
 
-// Retrying this with identical keyFields will not execute twice
-await safeRefund({ transaction: 'TX_123', amount: 1500, reason: 'missing drink' });
+await refund({ transaction: 'T123', amount: 1500, reason: 'missing drink' });
 ```
 
-### 2. MCP Proxy (`@twiceshy/mcp-proxy`)
+A retry with the same `transaction` and `amount` returns the first result and does not run the refund again. Full details are in [packages/core/README.md](packages/core/README.md).
 
-Add one line to your MCP client config (Claude Desktop, Cursor, Antigravity):
+## Quick start: the proxy
+
+Add one entry to your MCP client config:
 
 ```json
 {
@@ -46,12 +52,29 @@ Add one line to your MCP client config (Claude Desktop, Cursor, Antigravity):
 }
 ```
 
----
+Then run the health check:
 
-## Documentation
+```bash
+npx -y @twiceshy/mcp-proxy doctor --config /path/to/twiceshy.config.json
+```
 
-Full documentation, including "Choosing keyFields", "What in-doubt means", and configuration guides are in the repository and accompanying guides. See [SPEC.md](./SPEC.md) for the formal specification.
+Full details are in [packages/mcp-proxy/README.md](packages/mcp-proxy/README.md).
+
+## Examples
+
+- [Library example: the Kola refund](examples/library-paystack-refund): one refund, two retries, one payment.
+- [Proxy example: point Claude at Twiceshy](examples/proxy-claude-config): a real config with the counter fixture server.
+
+## Guides
+
+- [Choosing keyFields](docs/choosing-key-fields.md): the most important safety page.
+- [What in doubt means and what to do](docs/in-doubt.md): written for a business owner.
+- [Window versus retention](docs/window-and-retention.md): the two time settings.
+- [Limits](docs/limits.md): what Twiceshy does not do.
+- [Error reference](docs/errors.md): every error code in plain words.
+
+The formal specification is in [SPEC.md](SPEC.md).
 
 ## License
 
-MIT © 2026 Joseph Brendan, Dev and Design HQ
+MIT. Copyright 2026 Joseph Brendan, Dev and Design HQ.

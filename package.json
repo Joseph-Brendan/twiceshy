@@ -5,7 +5,7 @@
   "description": "Twiceshy: Repeat-Action Guard for AI agents",
   "type": "module",
   "scripts": {
-    "typecheck": "pnpm -r exec tsc --noEmit",
+    "typecheck": "pnpm -r --filter='./packages/*' exec tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",

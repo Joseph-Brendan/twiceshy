@@ -1,0 +1,13 @@
+{
+  "name": "@twiceshy/example-library-paystack-refund",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Runnable twiceshy library example: one refund, two retries, one payment.",
+  "type": "module",
+  "scripts": {
+    "start": "pnpm -w --filter twiceshy build && node index.mjs"
+  },
+  "dependencies": {
+    "twiceshy": "workspace:*"
+  }
+}

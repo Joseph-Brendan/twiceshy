@@ -1,0 +1,18 @@
+{
+  "$schema": "https://unpkg.com/@twiceshy/mcp-proxy/schema.json",
+  "store": { "type": "sqlite", "path": "./.twiceshy/actions.db" },
+  "window": "10m",
+  "onStoreFailure": "closed",
+  "toolNaming": "prefix",
+  "mcpServers": {
+    "counter": {
+      "command": "node",
+      "args": ["../../packages/mcp-proxy/test/fixtures/counter-server.mjs"],
+      "env": { "TWICESHY_COUNTER_FILE": "./.twiceshy/counter.txt" },
+      "tools": {
+        "create_charge": { "guard": true, "keyFields": ["amount"] },
+        "get_count": { "guard": false }
+      }
+    }
+  }
+}
