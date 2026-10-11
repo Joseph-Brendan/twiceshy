@@ -6,7 +6,7 @@ export default defineConfig({
     environment: 'node',
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'json', 'html'],
+      reporter: [['text', { skipFull: false }], 'json', 'html'],
       include: ['packages/*/src/**/*.ts'],
       exclude: ['**/*.d.ts', '**/test/**', '**/node_modules/**', '**/dist/**'],
       thresholds: {
@@ -14,6 +14,24 @@ export default defineConfig({
         branches: 90,
         functions: 90,
         statements: 90,
+        'packages/core/src/errors.ts': {
+          lines: 100,
+          branches: 100,
+          functions: 100,
+          statements: 100,
+        },
+        'packages/core/src/duration.ts': {
+          lines: 100,
+          branches: 100,
+          functions: 100,
+          statements: 100,
+        },
+        'packages/core/src/redact.ts': {
+          lines: 100,
+          branches: 100,
+          functions: 100,
+          statements: 100,
+        },
       },
     },
   },

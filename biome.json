@@ -37,6 +37,9 @@
     "enabled": true,
     "rules": {
       "preset": "recommended",
+      "nursery": {
+        "noFloatingPromises": "error"
+      },
       "suspicious": {
         "noExplicitAny": "error"
       }

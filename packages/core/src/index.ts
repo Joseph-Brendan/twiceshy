@@ -1,8 +1,8 @@
 /**
  * Twiceshy core library.
  */
-export const VERSION = '0.0.0';
+export * from './duration.js';
+export * from './errors.js';
+export * from './redact.js';
 
-export function isTwiceshyActive(): boolean {
-  return true;
-}
+export const VERSION = '0.0.0';

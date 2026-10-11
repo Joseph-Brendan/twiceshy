@@ -11,7 +11,7 @@
     "format": "biome format --write .",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
-    "test:stress": "vitest run --testPathPattern=stress",
+    "test:stress": "vitest run stress --passWithNoTests",
     "build": "pnpm -r --filter='./packages/*' run build",
     "check:package": "pnpm -r --filter='./packages/*' run check:package"
   },
