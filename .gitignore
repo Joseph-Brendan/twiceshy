@@ -4,6 +4,7 @@ coverage/
 .DS_Store
 *.log
 *.db
+!packages/core/test/fixtures/*.db
 *.db-wal
 *.db-shm
 .twiceshy/

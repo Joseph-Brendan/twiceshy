@@ -22,6 +22,16 @@
     "./stores/contract": {
       "types": "./dist/stores/contract.d.ts",
       "import": "./dist/stores/contract.js"
+    },
+    "./sqlite": {
+      "import": {
+        "types": "./dist/sqlite.d.ts",
+        "default": "./dist/sqlite.js"
+      },
+      "require": {
+        "types": "./dist/sqlite.d.cts",
+        "default": "./dist/sqlite.cjs"
+      }
     }
   },
   "files": [
@@ -31,6 +41,9 @@
     "*": {
       "stores/contract": [
         "./dist/stores/contract.d.ts"
+      ],
+      "sqlite": [
+        "./dist/sqlite.d.ts"
       ]
     }
   },

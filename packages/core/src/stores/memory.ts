@@ -1,6 +1,6 @@
-import type { EngineRecord, RecordPatch } from '../engine.js';
 import { afterExecution, decide, lateCompletion } from '../engine.js';
 import { NotSerializableError, StoreUnavailableError } from '../errors.js';
+import { applyPatch, recordNotFound, toEngineRecord } from './record.js';
 import type {
   ActionRecord,
   ActionStore,
@@ -19,39 +19,6 @@ function clone<T>(value: T): T {
   } catch (cause) {
     throw new NotSerializableError({ cause });
   }
-}
-
-function toEngineRecord(record: ActionRecord): EngineRecord {
-  return {
-    id: record.id,
-    fingerprint: record.fingerprint,
-    state: record.state,
-    attempt: record.attempt,
-    leaseUntil: record.leaseExpiresAt,
-    completedAt: record.completedAt,
-    result: record.result,
-    repeatGrant: record.repeatGrant,
-  };
-}
-
-/** Applies an engine patch to a stored record, returning a new object. */
-function applyPatch(record: ActionRecord, patch: RecordPatch): ActionRecord {
-  return {
-    ...record,
-    state: patch.state ?? record.state,
-    leaseExpiresAt: patch.leaseUntil === undefined ? record.leaseExpiresAt : patch.leaseUntil,
-    completedAt: patch.completedAt === undefined ? record.completedAt : patch.completedAt,
-    result: 'result' in patch ? clone(patch.result) : record.result,
-  };
-}
-
-function recordNotFound(id: string): StoreUnavailableError {
-  return new StoreUnavailableError({
-    recordId: id,
-    what: `The record "${id}" was not found in the store.`,
-    why: 'The record was purged or never existed, but the caller expected it to be present.',
-    fix: 'Check the record id, or list the current records with `twiceshy list`.',
-  });
 }
 
 /**
@@ -87,6 +54,7 @@ export class MemoryStore implements ActionStore {
           state: 'IN_FLIGHT',
           attempt: decision.changes.attempt as number,
           result: undefined,
+          resultTruncated: false,
           startedAt: input.now,
           completedAt: null,
           leaseExpiresAt: decision.changes.leaseUntil as Date,

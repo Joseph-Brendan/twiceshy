@@ -65,7 +65,14 @@ export interface CompleteInput {
   settings: EngineSettings;
   /** Short human-readable summary stored for audit. */
   errorSummary?: string;
+  /** Store the full result (default true). False keeps a short summary only. */
+  storeResult?: boolean;
+  /** Largest full result to store, in bytes. Default 256 KB. */
+  maxResultBytes?: number;
 }
+
+/** Default limit for stored results (SPEC.md C9: 256 KB). */
+export const DEFAULT_MAX_RESULT_BYTES = 256 * 1024;
 
 export interface ListFilter {
   state?: RecordState | readonly RecordState[];

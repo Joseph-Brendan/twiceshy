@@ -47,7 +47,7 @@ const arbJsonValue = fc.letrec((tie) => ({
     fc.integer(),
     fc.double({ noNaN: true, noDefaultInfinity: true }),
     fc.string(),
-    fc.date(),
+    fc.date({ noInvalidDate: true }),
     fc.bigInt(),
     fc.array(tie('value'), { maxLength: 3 }),
     fc.dictionary(fc.string(), tie('value'), { maxKeys: 3 }),
