@@ -26,6 +26,8 @@ jobs:
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          vsversion: '2022'
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
