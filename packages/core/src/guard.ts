@@ -143,6 +143,11 @@ export interface CreateGuardOptions {
   leaseMs?: number | string;
   /** How long close() waits for in-flight calls. Default 30000. */
   closeTimeoutMs?: number;
+  /**
+   * Whether close() also closes the store. Default true. Set false when
+   * several guards share one store; the owner closes it instead.
+   */
+  closeStore?: boolean;
   /** Trust MCP idempotentHint annotations. Default true. */
   trustIdempotentHint?: boolean;
   /** Extra fields to redact, on top of the C12 defaults. */
@@ -166,6 +171,7 @@ interface NormalizedGuardOptions {
   /** Null means the C6 default: timeoutMs + 30 s. */
   leaseMs: number | null;
   closeTimeoutMs: number;
+  closeStore: boolean;
   trustIdempotentHint: boolean;
   redact: readonly string[];
   classifyError: CustomErrorClassifier | undefined;
@@ -352,6 +358,7 @@ const optionsSchema = z.object({
   timeoutMs: durationSchema.optional(),
   leaseMs: positiveDurationSchema.optional(),
   closeTimeoutMs: durationSchema.optional(),
+  closeStore: z.boolean({ error: 'expected true or false, for example true' }).optional(),
   trustIdempotentHint: z.boolean({ error: 'expected true or false, for example true' }).optional(),
   redact: z
     .array(
@@ -436,6 +443,7 @@ function normalizeOptions(options: CreateGuardOptions): NormalizedGuardOptions {
     timeoutMs: parseDuration(data.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     leaseMs: data.leaseMs === undefined ? null : parseDuration(data.leaseMs),
     closeTimeoutMs: parseDuration(data.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS),
+    closeStore: data.closeStore ?? true,
     trustIdempotentHint: data.trustIdempotentHint ?? true,
     redact: data.redact ?? [],
     classifyError: data.classifyError,
@@ -652,7 +660,9 @@ class DefaultGuard implements Guard {
     }
     this.activeRenewals.clear();
     await this.waitForActiveCalls();
-    await this.options.store.close();
+    if (this.options.closeStore) {
+      await this.options.store.close();
+    }
   }
 
   private async runClaim<T>(

@@ -1,6 +1,23 @@
+import { fileURLToPath } from 'node:url';
 import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  resolve: {
+    // Tests use the core sources directly so `pnpm test` does not depend on a
+    // prior build. The built package is exercised separately by the P9 test.
+    alias: [
+      {
+        find: /^twiceshy\/sqlite$/,
+        replacement: fileURLToPath(
+          new URL('./packages/core/src/stores/sqlite.ts', import.meta.url),
+        ),
+      },
+      {
+        find: /^twiceshy$/,
+        replacement: fileURLToPath(new URL('./packages/core/src/index.ts', import.meta.url)),
+      },
+    ],
+  },
   test: {
     globals: true,
     environment: 'node',

@@ -92,6 +92,13 @@ class ReadFailStore extends MemoryStore {
   }
 }
 
+class CloseSpyStore extends MemoryStore {
+  closes = 0;
+  override async close(): Promise<void> {
+    this.closes += 1;
+  }
+}
+
 function failingRenewStore(inner: ActionStore): ActionStore {
   return {
     begin: (input) => inner.begin(input),
@@ -811,6 +818,19 @@ describe.each(STORE_CASES)('guard with $name', ({ createStore }) => {
 });
 
 describe('createGuard options', () => {
+  it('close leaves a shared store open when closeStore is false', async () => {
+    const store = new CloseSpyStore();
+    const shared = createGuard({ store, closeStore: false });
+    const owner = createGuard({ store, closeStore: false });
+    await shared.close();
+    await owner.close();
+    expect(store.closes).toBe(0);
+
+    const closing = createGuard({ store });
+    await closing.close();
+    expect(store.closes).toBe(1);
+  });
+
   it('validates every option and lists all problems in a single CONFIG_INVALID error', () => {
     const invalid = {
       store: null,

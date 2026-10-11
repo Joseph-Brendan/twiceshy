@@ -96,6 +96,7 @@ describe('proxy', () => {
       'paginated__gamma',
       'simple__alpha',
       'simple__echo',
+      'twiceshy_status',
     ]);
 
     // Pagination: gamma only exists on a second page of the fake server.
@@ -137,7 +138,11 @@ describe('proxy', () => {
     });
 
     const before = await client.listTools();
-    expect(before.tools.map((tool) => tool.name).sort()).toEqual(['dyn__alpha', 'dyn__grow']);
+    expect(before.tools.map((tool) => tool.name).sort()).toEqual([
+      'dyn__alpha',
+      'dyn__grow',
+      'twiceshy_status',
+    ]);
 
     await client.callTool({ name: 'dyn__grow', arguments: {} });
     await waitUntil(() => changes > 0);
@@ -147,6 +152,7 @@ describe('proxy', () => {
       'dyn__alpha',
       'dyn__beta',
       'dyn__grow',
+      'twiceshy_status',
     ]);
   });
 
@@ -164,7 +170,11 @@ describe('proxy', () => {
     clients.add(client);
 
     const listed = await client.listTools();
-    expect(listed.tools.map((tool) => tool.name).sort()).toEqual(['simple__alpha', 'simple__echo']);
+    expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
+      'simple__alpha',
+      'simple__echo',
+      'twiceshy_status',
+    ]);
   });
 
   it('P5: a server that fails at startup does not stop the proxy', async () => {
@@ -196,7 +206,11 @@ describe('proxy', () => {
 
     const client = await connectInMemoryClient(proxy);
     const listed = await client.listTools();
-    expect(listed.tools.map((tool) => tool.name).sort()).toEqual(['good__alpha', 'good__echo']);
+    expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
+      'good__alpha',
+      'good__echo',
+      'twiceshy_status',
+    ]);
   });
 
   it('P10: a tool name collision in none mode is CONFIG_INVALID naming both servers', async () => {

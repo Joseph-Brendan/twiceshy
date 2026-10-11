@@ -8,11 +8,11 @@ describe('mcp-proxy placeholder', () => {
     expect(isProxyAvailable()).toBe(true);
   });
 
-  it('runs cli with version and help flags', () => {
-    expect(runCli(['--version'])).toBe(0);
-    expect(runCli(['-v'])).toBe(0);
-    expect(runCli(['--help'])).toBe(0);
-    expect(runCli(['-h'])).toBe(0);
-    expect(runCli([])).toBe(0);
+  it('runs cli with version and help flags', async () => {
+    expect(await runCli(['--version'])).toBe(0);
+    expect(await runCli(['-v'])).toBe(0);
+    expect(await runCli(['--help'])).toBe(0);
+    expect(await runCli(['-h'])).toBe(0);
+    expect(await runCli([])).toBe(2);
   });
 });

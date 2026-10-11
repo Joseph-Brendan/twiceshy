@@ -1,8 +1,11 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "paths": {
+      "twiceshy": ["../core/src/index.ts"],
+      "twiceshy/sqlite": ["../core/src/stores/sqlite.ts"]
+    }
   },
   "include": ["src/**/*"]
 }
