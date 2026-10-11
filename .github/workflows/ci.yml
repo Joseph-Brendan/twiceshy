@@ -16,9 +16,16 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         node-version: [22, 24]
 
+    env:
+      GYP_MSVS_VERSION: '2022'
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -45,3 +52,6 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Check package
+        run: pnpm check:package
