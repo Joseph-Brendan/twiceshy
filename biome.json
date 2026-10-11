@@ -17,7 +17,8 @@
       "!**/dist",
       "!**/coverage",
       "!**/node_modules",
-      "!**/.changeset"
+      "!**/.changeset",
+      "!packages/mcp-proxy/schema.json"
     ]
   },
   "formatter": {

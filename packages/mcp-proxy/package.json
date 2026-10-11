@@ -24,7 +24,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "schema.json"
   ],
   "engines": {
     "node": ">=22.14.0"
@@ -33,6 +34,7 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
+    "schema:generate": "pnpm build && node ./scripts/generate-schema.mjs",
     "check:package": "publint && attw --pack ."
   },
   "dependencies": {
