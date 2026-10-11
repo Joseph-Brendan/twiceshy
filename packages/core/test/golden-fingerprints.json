@@ -1,0 +1,289 @@
+{
+  "$comment": "Golden fingerprints for fingerprint format v1. These values must NEVER change without bumping the fingerprint version (FINGERPRINT_VERSION in packages/core/src/fingerprint.ts): changing them would silently stop old stored records from matching. In this fixture only, Date is encoded as {\"$tag\":\"date\",\"value\":\"<ISO>\"} and BigInt as {\"$tag\":\"bigint\",\"value\":\"<decimal>\"}; the F9 test decodes these before computing.",
+  "cases": [
+    {
+      "name": "flat object",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "b": 2,
+        "a": 1
+      },
+      "expected": "667f5e45227cf4d9a7f9ab26fd97aa7ddcea9afd30487cad2a163d0baf06dc43"
+    },
+    {
+      "name": "flat object, keys in another order",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "a": 1,
+        "b": 2
+      },
+      "expected": "667f5e45227cf4d9a7f9ab26fd97aa7ddcea9afd30487cad2a163d0baf06dc43"
+    },
+    {
+      "name": "nested objects",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "customer": {
+          "name": "Ife",
+          "email": "ife@example.com"
+        },
+        "amount": 1500
+      },
+      "expected": "ede2cfea9b5ad6a49efcac4988598cd19050ef3ec5381884be10fb16abf7912d"
+    },
+    {
+      "name": "array of objects",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "items": [
+          {
+            "sku": "A1",
+            "qty": 2
+          },
+          {
+            "sku": "B2",
+            "qty": 1
+          }
+        ]
+      },
+      "expected": "5377f2e6e032220d3db9f282e7c1e15faa1e74352b2b2855d295a87c94bed37f"
+    },
+    {
+      "name": "array order matters",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "tags": ["refund", "duplicate"]
+      },
+      "expected": "f59f0d9f3e2df62e5eaedcc36d2f33f9049fa8cbe599e637b8042fdd5b92f9b6"
+    },
+    {
+      "name": "array order matters, reversed",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "tags": ["duplicate", "refund"]
+      },
+      "expected": "7cba7a07f091dcb25710d48638b7acb174443863914fb580c43e5338062e54f4"
+    },
+    {
+      "name": "unicode strings",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "note": "Café ☕ — ₦1,500"
+      },
+      "expected": "634973428c9b0ca73320ab6af40a55b77bf334e53e0f70f73f6b3926d92a191d"
+    },
+    {
+      "name": "Date value",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "when": {
+          "$tag": "date",
+          "value": "2026-01-01T00:00:00.000Z"
+        }
+      },
+      "expected": "3f060448ba414760012520958504200ee8f98af0bfd09d3456f7fa915162f671"
+    },
+    {
+      "name": "BigInt value",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "transactionId": {
+          "$tag": "bigint",
+          "value": "9007199254740993"
+        }
+      },
+      "expected": "21c9e419d543366ecb8097788069c6df02af06f5d6e4ca7c77624979b86b897b"
+    },
+    {
+      "name": "plain string that looks like a Date",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "when": "2026-01-01T00:00:00.000Z"
+      },
+      "expected": "58268094b37a8561d1a4888f4c971b09e0a05af8912571b07a6d36c0bbde3c95"
+    },
+    {
+      "name": "number normaliser from a string",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "amount": "1500.50"
+      },
+      "options": {
+        "normalize": {
+          "amount": "number"
+        }
+      },
+      "expected": "18339972e805452a3f7d3b04f2a95795b066397ce025c2dc86526e19772128e8"
+    },
+    {
+      "name": "number normaliser from a number (same fingerprint as the string)",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "amount": 1500.5
+      },
+      "options": {
+        "normalize": {
+          "amount": "number"
+        }
+      },
+      "expected": "18339972e805452a3f7d3b04f2a95795b066397ce025c2dc86526e19772128e8"
+    },
+    {
+      "name": "lowercase normaliser",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "email": "IFE@EXAMPLE.COM"
+      },
+      "options": {
+        "normalize": {
+          "email": "lowercase"
+        }
+      },
+      "expected": "ebe6d6403eaeec849e50b7108e7e84cca67c556298ef55ad7f779cb7f6c61aef"
+    },
+    {
+      "name": "trim normaliser",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "reason": "  missing drink  "
+      },
+      "options": {
+        "normalize": {
+          "reason": "trim"
+        }
+      },
+      "expected": "86510d11fed450d7f717c600322d370882ad305ee274283930ef709f60e960ab"
+    },
+    {
+      "name": "lowercase-trim normaliser",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "email": "  IFE@Example.COM  "
+      },
+      "options": {
+        "normalize": {
+          "email": "lowercase-trim"
+        }
+      },
+      "expected": "ebe6d6403eaeec849e50b7108e7e84cca67c556298ef55ad7f779cb7f6c61aef"
+    },
+    {
+      "name": "scope is part of the fingerprint",
+      "serverId": "paystack",
+      "toolName": "create_refund",
+      "scope": "customer-ife",
+      "args": {
+        "amount": 1500,
+        "transaction": "T123"
+      },
+      "expected": "c84b1d5232d0181459a19bdee83812aeb425ce0627a73161827099600636a7e6"
+    },
+    {
+      "name": "same arguments, different scope",
+      "serverId": "paystack",
+      "toolName": "create_refund",
+      "scope": "customer-ada",
+      "args": {
+        "amount": 1500,
+        "transaction": "T123"
+      },
+      "expected": "6679f1af911759c5171be8eca2e58e7325b7479df420b7174f85b1bad7b6a3aa"
+    },
+    {
+      "name": "ignoreFields drops the reason and debug fields",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "amount": 1500,
+        "reason": "because",
+        "debug": true
+      },
+      "options": {
+        "ignoreFields": ["reason", "debug"]
+      },
+      "expected": "7854697148301cfe1daff9b9d580eafe8f045446e71b80d5c34648fdf19539bf"
+    },
+    {
+      "name": "keyFields with a missing field",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "transaction": "T1"
+      },
+      "options": {
+        "keyFields": ["transaction", "amount"]
+      },
+      "expected": "4fb860735bba06085ae815e76c57072263dd13b25ed3826674ec798c5146b483",
+      "expectedMissing": ["amount"]
+    },
+    {
+      "name": "mixed primitive types",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "ok": true,
+        "extra": null,
+        "items": [],
+        "meta": {}
+      },
+      "expected": "d47219ca132ec321b1cfcb1808118cd3ebe9b52b6a586018f5be051da4bcfc98"
+    },
+    {
+      "name": "negative and decimal numbers",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "amount": -3.25,
+        "count": 0
+      },
+      "expected": "5c13b8bedcd5303c68e4c072ed35e0954400e6f10a8105f23cc9285a7b79193a"
+    },
+    {
+      "name": "deep keyFields path",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "customer": {
+          "email": "a@b.c",
+          "name": "Ada"
+        }
+      },
+      "options": {
+        "keyFields": ["customer.email"]
+      },
+      "expected": "1b2acfa3fb4cafc5a9b5f99fa5d27f67aff369033e4914c4b41a8c2b3d6d9cc7",
+      "expectedMissing": []
+    },
+    {
+      "name": "nested arrays",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {
+        "matrix": [[1, 2], [3, 4]]
+      },
+      "expected": "08b08ecb70aa3b9772e443faaa55263df81a5a4b94198c2b6aa07fc35df360fb"
+    },
+    {
+      "name": "empty object",
+      "serverId": "local",
+      "toolName": "test.tool",
+      "args": {},
+      "expected": "b04d4be6ec0658a652e46cc27298a97cde812d3d2d750a1d7056dbda479fb79e"
+    }
+  ]
+}

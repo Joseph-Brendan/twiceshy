@@ -26,6 +26,12 @@ export default defineConfig({
           functions: 100,
           statements: 100,
         },
+        'packages/core/src/fingerprint.ts': {
+          lines: 100,
+          branches: 100,
+          functions: 100,
+          statements: 100,
+        },
         'packages/core/src/redact.ts': {
           lines: 100,
           branches: 100,
