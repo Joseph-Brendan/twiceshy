@@ -18,7 +18,7 @@ export type RecordState =
   | 'RESOLVED_FAILED';
 
 /** A human-approved repeat that has not been consumed yet. */
-export interface RepeatGrant {
+export interface EngineRepeatGrant {
   grantedAt: Date;
 }
 
@@ -36,7 +36,7 @@ export interface EngineRecord {
   /** Stored result for a successful action. */
   result: unknown;
   /** Set by allowRepeat; consumed by the next execution. */
-  repeatGrant: RepeatGrant | null;
+  repeatGrant: EngineRepeatGrant | null;
 }
 
 /** The changes a decision asks the store to apply. */
@@ -46,7 +46,7 @@ export interface RecordPatch {
   leaseUntil?: Date | null;
   completedAt?: Date | null;
   result?: unknown;
-  repeatGrant?: RepeatGrant | null;
+  repeatGrant?: EngineRepeatGrant | null;
 }
 
 export interface EngineSettings {

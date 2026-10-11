@@ -1,0 +1,281 @@
+import type { EngineRecord, RecordPatch } from '../engine.js';
+import { afterExecution, decide, lateCompletion } from '../engine.js';
+import { NotSerializableError, StoreUnavailableError } from '../errors.js';
+import type {
+  ActionRecord,
+  ActionStore,
+  BeginInput,
+  BeginResult,
+  CompleteInput,
+  ListFilter,
+  RepeatGrant,
+  Resolution,
+} from './types.js';
+
+/** Deep copy that turns unclonable values into NOT_SERIALIZABLE. */
+function clone<T>(value: T): T {
+  try {
+    return structuredClone(value);
+  } catch (cause) {
+    throw new NotSerializableError({ cause });
+  }
+}
+
+function toEngineRecord(record: ActionRecord): EngineRecord {
+  return {
+    id: record.id,
+    fingerprint: record.fingerprint,
+    state: record.state,
+    attempt: record.attempt,
+    leaseUntil: record.leaseExpiresAt,
+    completedAt: record.completedAt,
+    result: record.result,
+    repeatGrant: record.repeatGrant,
+  };
+}
+
+/** Applies an engine patch to a stored record, returning a new object. */
+function applyPatch(record: ActionRecord, patch: RecordPatch): ActionRecord {
+  return {
+    ...record,
+    state: patch.state ?? record.state,
+    leaseExpiresAt: patch.leaseUntil === undefined ? record.leaseExpiresAt : patch.leaseUntil,
+    completedAt: patch.completedAt === undefined ? record.completedAt : patch.completedAt,
+    result: 'result' in patch ? clone(patch.result) : record.result,
+  };
+}
+
+function recordNotFound(id: string): StoreUnavailableError {
+  return new StoreUnavailableError({
+    recordId: id,
+    what: `The record "${id}" was not found in the store.`,
+    why: 'The record was purged or never existed, but the caller expected it to be present.',
+    fix: 'Check the record id, or list the current records with `twiceshy list`.',
+  });
+}
+
+/**
+ * In-memory store for single-process use and tests. Data is lost on restart.
+ */
+export class MemoryStore implements ActionStore {
+  private readonly records = new Map<string, ActionRecord>();
+  private sequence = 0;
+
+  async begin(input: BeginInput): Promise<BeginResult> {
+    // Atomicity rule (C12): everything from the read on the next line to the
+    // record write at the end of this method runs synchronously, with no
+    // `await` in between. On a single JavaScript thread nothing can interleave
+    // in that gap, so two parallel calls can never both see "no record" and
+    // both run the refund — the Kola case where Ife would be paid twice.
+    const identity = input.explicitKey ?? input.fingerprint;
+    const existing = this.findCurrent((record) => record.identity === identity);
+    const request =
+      input.explicitKey === null
+        ? { fingerprint: input.fingerprint }
+        : { fingerprint: input.fingerprint, explicitKey: input.explicitKey };
+    const decision = decide(
+      existing === null ? null : toEngineRecord(existing),
+      request,
+      input.now,
+      input.settings,
+    );
+
+    if (decision.kind === 'execute') {
+      if (existing !== null && !decision.archiveExisting) {
+        const restarted: ActionRecord = {
+          ...existing,
+          state: 'IN_FLIGHT',
+          attempt: decision.changes.attempt as number,
+          result: undefined,
+          startedAt: input.now,
+          completedAt: null,
+          leaseExpiresAt: decision.changes.leaseUntil as Date,
+          repeatGrant: null,
+        };
+        this.records.set(restarted.id, clone(restarted));
+        return { kind: 'execute', record: clone(restarted), archived: null };
+      }
+      const record: ActionRecord = {
+        id: this.nextId(),
+        identity,
+        fingerprint: input.fingerprint,
+        explicitKey: input.explicitKey,
+        serverId: input.serverId,
+        toolName: input.toolName,
+        scope: input.scope,
+        state: 'IN_FLIGHT',
+        attempt: decision.changes.attempt as number,
+        redactedArgs: clone(input.redactedArgs),
+        result: undefined,
+        resultTruncated: false,
+        errorSummary: null,
+        createdAt: input.now,
+        startedAt: input.now,
+        completedAt: null,
+        leaseExpiresAt: decision.changes.leaseUntil as Date,
+        resolvedAt: null,
+        resolvedBy: null,
+        resolutionNote: null,
+        repeatGrant: null,
+      };
+      this.records.set(record.id, clone(record));
+      if (existing === null) {
+        return { kind: 'execute', record: clone(record), archived: null };
+      }
+      // A window-passed success: archive the old record and clear its unused grant.
+      const archived: ActionRecord = { ...existing, repeatGrant: null };
+      this.records.set(archived.id, clone(archived));
+      return { kind: 'execute', record: clone(record), archived: clone(archived) };
+    }
+
+    const current = existing as ActionRecord;
+    if (decision.kind === 'duplicate') {
+      return {
+        kind: 'duplicate',
+        record: clone(current),
+        originalResult: clone(current.result),
+        originalAt: current.completedAt,
+      };
+    }
+    if (decision.kind === 'wait') {
+      return { kind: 'wait', record: clone(current), waitMs: decision.waitMs };
+    }
+    if (decision.kind === 'block-in-doubt') {
+      const stored = applyPatch(current, decision.changes);
+      this.records.set(stored.id, clone(stored));
+      return { kind: 'block-in-doubt', record: clone(stored) };
+    }
+    return { kind: 'reject-key-conflict', record: clone(current) };
+  }
+
+  async renewLease(id: string, until: Date): Promise<void> {
+    const record = this.records.get(id);
+    if (record === undefined) {
+      throw recordNotFound(id);
+    }
+    if (record.state !== 'IN_FLIGHT') {
+      return;
+    }
+    this.records.set(id, clone({ ...record, leaseExpiresAt: new Date(until.getTime()) }));
+  }
+
+  async complete(id: string, input: CompleteInput): Promise<void> {
+    const record = this.records.get(id);
+    if (record === undefined) {
+      throw recordNotFound(id);
+    }
+    if (record.state !== 'IN_FLIGHT' && record.state !== 'IN_DOUBT') {
+      // Never overwrite a terminal state set by another process or a human.
+      return;
+    }
+    const engineRecord = toEngineRecord(record);
+    const patch =
+      record.state === 'IN_FLIGHT'
+        ? afterExecution(engineRecord, input.outcome, input.now, input.settings)
+        : lateCompletion(engineRecord, input.outcome, input.now);
+    const updated: ActionRecord = {
+      ...applyPatch(record, patch),
+      errorSummary: input.errorSummary ?? record.errorSummary,
+    };
+    this.records.set(id, clone(updated));
+  }
+
+  async get(id: string): Promise<ActionRecord | null> {
+    const record = this.records.get(id);
+    return record === undefined ? null : clone(record);
+  }
+
+  async findByIdentity(identity: string): Promise<ActionRecord | null> {
+    const record = this.findCurrent((candidate) => candidate.identity === identity);
+    return record === null ? null : clone(record);
+  }
+
+  async list(filter: ListFilter): Promise<ActionRecord[]> {
+    const states =
+      filter.state === undefined
+        ? null
+        : Array.isArray(filter.state)
+          ? filter.state
+          : [filter.state];
+    const records = [...this.records.values()]
+      .filter((record) => states === null || states.includes(record.state))
+      .filter(
+        (record) =>
+          filter.since === undefined || record.createdAt.getTime() >= filter.since.getTime(),
+      )
+      .filter(
+        (record) => filter.fingerprint === undefined || record.fingerprint === filter.fingerprint,
+      )
+      .filter((record) => filter.serverId === undefined || record.serverId === filter.serverId)
+      .filter((record) => filter.toolName === undefined || record.toolName === filter.toolName)
+      .filter((record) => filter.scope === undefined || record.scope === filter.scope)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const limited = filter.limit === undefined ? records : records.slice(0, filter.limit);
+    return limited.map((record) => clone(record));
+  }
+
+  async resolve(id: string, resolution: Resolution): Promise<void> {
+    const record = this.records.get(id);
+    if (record === undefined) {
+      throw recordNotFound(id);
+    }
+    const resolved: ActionRecord = {
+      ...record,
+      state: resolution.as === 'succeeded' ? 'RESOLVED_SUCCEEDED' : 'RESOLVED_FAILED',
+      completedAt: new Date(resolution.at.getTime()),
+      resolvedAt: new Date(resolution.at.getTime()),
+      resolvedBy: resolution.by,
+      resolutionNote: resolution.note ?? null,
+      leaseExpiresAt: null,
+    };
+    this.records.set(id, clone(resolved));
+  }
+
+  async grantRepeat(fingerprint: string, grant: RepeatGrant): Promise<void> {
+    const record = this.findCurrent((candidate) => candidate.fingerprint === fingerprint);
+    if (record === null) {
+      throw new StoreUnavailableError({
+        what: `No record was found for fingerprint "${fingerprint}".`,
+        why: 'A repeat grant must attach to an existing action record.',
+        fix: 'Check the fingerprint, or list the current records with `twiceshy list`.',
+      });
+    }
+    this.records.set(record.id, clone({ ...record, repeatGrant: clone(grant) }));
+  }
+
+  async purge(olderThan: Date): Promise<number> {
+    const cutoff = olderThan.getTime();
+    let removed = 0;
+    for (const [id, record] of this.records) {
+      if (record.state === 'IN_FLIGHT' || record.state === 'IN_DOUBT') {
+        continue;
+      }
+      // Terminal records always carry completedAt (proved by the contract suite).
+      const finishedAt = record.completedAt as Date;
+      if (finishedAt.getTime() >= cutoff) {
+        continue;
+      }
+      this.records.delete(id);
+      removed += 1;
+    }
+    return removed;
+  }
+
+  async close(): Promise<void> {
+    // Memory-only storage holds nothing outside the Maps; nothing to release.
+  }
+
+  private findCurrent(matches: (record: ActionRecord) => boolean): ActionRecord | null {
+    const candidates = [...this.records.values()].filter(matches);
+    if (candidates.length === 0) {
+      return null;
+    }
+    candidates.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    return candidates[0] as ActionRecord;
+  }
+
+  private nextId(): string {
+    this.sequence += 1;
+    return `mem-${this.sequence}`;
+  }
+}

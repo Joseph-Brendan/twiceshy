@@ -18,28 +18,43 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./stores/contract": {
+      "types": "./dist/stores/contract.d.ts",
+      "import": "./dist/stores/contract.js"
     }
   },
   "files": [
     "dist"
   ],
+  "typesVersions": {
+    "*": {
+      "stores/contract": [
+        "./dist/stores/contract.d.ts"
+      ]
+    }
+  },
   "engines": {
     "node": ">=22"
   },
   "sideEffects": false,
   "scripts": {
-    "build": "tsup",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
     "typecheck": "tsc --noEmit",
-    "check:package": "publint && attw --pack ."
+    "check:package": "publint && attw --pack . --exclude-entrypoints ./stores/contract && attw --pack . --entrypoints ./stores/contract --profile esm-only"
   },
   "dependencies": {
     "zod": "^4.6.5"
   },
   "peerDependencies": {
-    "better-sqlite3": "^13.0.0"
+    "better-sqlite3": "^13.0.0",
+    "vitest": ">=4"
   },
   "peerDependenciesMeta": {
     "better-sqlite3": {
+      "optional": true
+    },
+    "vitest": {
       "optional": true
     }
   },
