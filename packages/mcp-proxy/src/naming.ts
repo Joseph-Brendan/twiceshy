@@ -47,6 +47,11 @@ export function prefixToolName(server: string, tool: string): string {
   return `${encodeNamePart(server)}${SEPARATOR}${encodeNamePart(tool)}`;
 }
 
+/** The exposed name for a tool, prompt, or resource under the chosen naming. */
+export function exposeName(server: string, name: string, naming: ToolNaming): string {
+  return naming === 'prefix' ? prefixToolName(server, name) : name;
+}
+
 /** A connection as naming needs to see it. */
 export interface NamedToolSource {
   name: string;

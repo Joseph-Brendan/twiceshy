@@ -9,6 +9,7 @@ export * from './downstream.js';
 export * from './logger.js';
 export * from './naming.js';
 export * from './proxy.js';
+export * from './restart.js';
 export { PROXY_VERSION } from './version.js';
 
 export function isProxyAvailable(): boolean {

@@ -14,5 +14,7 @@ describe('mcp-proxy placeholder', () => {
     expect(await runCli(['--help'])).toBe(0);
     expect(await runCli(['-h'])).toBe(0);
     expect(await runCli([])).toBe(2);
+    // Bad log level is a usage error, not a crash.
+    expect(await runCli(['proxy', '--config', 'x.json', '--log-level', 'verbose'])).toBe(2);
   });
 });

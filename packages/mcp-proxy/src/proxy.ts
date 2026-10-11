@@ -1,7 +1,11 @@
-import type { Implementation } from '@modelcontextprotocol/client';
+import type { Implementation, RequestOptions } from '@modelcontextprotocol/client';
 import type {
   CallToolRequest,
   CallToolResult,
+  Prompt,
+  Resource,
+  ResourceTemplateType,
+  ServerContext,
   Tool,
   ToolAnnotations,
   Transport,
@@ -12,33 +16,40 @@ import type {
   ActionRecord,
   ActionStore,
   Guard,
+  GuardEvent,
   ToolAnnotations as GuardToolAnnotations,
 } from 'twiceshy';
 import {
   ConfigInvalidError,
   classifyToolResult,
   createGuard,
+  DownstreamUnavailableError,
   definiteFailure,
   isTwiceshyError,
   MemoryStore,
   shouldGuard,
+  UnsupportedFeatureError,
 } from 'twiceshy';
 import { SqliteStore } from 'twiceshy/sqlite';
 import type { ProxyConfig, ToolOptions } from './config.js';
 import type { DownstreamConnection, DownstreamFailure, Downstreams } from './downstream.js';
 import { connectAllDownstreams, listAllTools } from './downstream.js';
-import { createLogger, type Logger } from './logger.js';
-import { buildToolRouting, type ToolRouting } from './naming.js';
+import { createLogger, type Logger, redirectConsoleToStderr } from './logger.js';
+import { buildToolRouting, exposeName, type ToolNaming, type ToolRouting } from './naming.js';
 import { PROXY_VERSION } from './version.js';
 
 /**
  * The proxy (C13). It exposes one MCP server to the agent, forwards unguarded
- * calls untouched, and sends guarded calls through the core guard with the
- * downstream server name as the namespace.
+ * calls untouched, sends guarded calls through the core guard with the
+ * downstream server name as the namespace, and keeps the agent informed about
+ * progress, cancellation, tool changes, and server failures.
  */
 
 /** The `_meta` key that carries Twiceshy's duplicate outcome (C8). */
 const OUTCOME_META_KEY = 'dev.twiceshy/outcome';
+
+/** How long shutdown waits for in-flight calls (C13). */
+const SHUTDOWN_LIMIT_MS = 10_000;
 
 export interface ProxyOptions {
   config: ProxyConfig;
@@ -71,6 +82,16 @@ interface ToolRoute {
   connection: DownstreamConnection;
   toolName: string;
   tool: Tool;
+}
+
+interface ResourceRoute {
+  connection: DownstreamConnection;
+  resource: Resource;
+}
+
+interface PromptRoute {
+  connection: DownstreamConnection;
+  prompt: Prompt;
 }
 
 interface ProxyTool {
@@ -107,6 +128,15 @@ function toolText(text: string, isError = false): CallToolResult {
 
 /** C8: blocked calls are tool errors, never protocol errors. */
 function blockedResult(error: { what: string; why: string; fix: string }): CallToolResult {
+  return toolText(
+    `Twiceshy blocked this call.\n${error.what}\nWhy: ${error.why}\nFix: ${error.fix}`,
+    true,
+  );
+}
+
+/** C13: a call to a crashed or unavailable server is a clean tool error. */
+function downstreamUnavailable(serverName: string, cause: unknown): CallToolResult {
+  const error = new DownstreamUnavailableError({ server: serverName, cause });
   return toolText(
     `Twiceshy blocked this call.\n${error.what}\nWhy: ${error.why}\nFix: ${error.fix}`,
     true,
@@ -191,18 +221,111 @@ function toProxyTool(tool: ProxyTool): Tool {
   };
 }
 
+/** One structured JSON line per guard event, at the C15-recommended level. */
+function logGuardEvent(logger: Logger, event: GuardEvent): void {
+  const child = logger.child(event.server);
+  switch (event.type) {
+    case 'execute':
+      child.debug(`executed ${event.tool}`, { ...event });
+      break;
+    case 'duplicate':
+      child.info(`duplicate ${event.tool}`, { ...event });
+      break;
+    case 'blocked':
+      child.warn(`blocked ${event.tool}`, { ...event });
+      break;
+    case 'in-doubt':
+      child.warn(`in doubt ${event.tool}`, { ...event });
+      break;
+    case 'late-completion':
+      child.info(`late completion ${event.tool}`, { ...event });
+      break;
+    case 'store-write-failed':
+      child.error(`store write failed for ${event.tool}`, { ...event });
+      break;
+    case 'guard-bypassed':
+      child.warn(`guard bypassed for ${event.tool}`, { ...event });
+      break;
+    case 'warning':
+      child.warn(`warning for ${event.tool}`, { ...event });
+      break;
+  }
+}
+
+function unsupportedFeature(feature: 'sampling' | 'elicitation'): UnsupportedFeatureError {
+  return new UnsupportedFeatureError({ feature });
+}
+
+/** Forwarding options: progress notifications and cancellation (C13). */
+function requestOptions(
+  progressToken: string | number | undefined,
+  ctx: ServerContext | undefined,
+): RequestOptions {
+  const options: RequestOptions = {};
+  if (ctx !== undefined && progressToken !== undefined) {
+    options.onprogress = (progress) => {
+      void ctx.mcpReq.notify({
+        method: 'notifications/progress',
+        params: {
+          progressToken,
+          progress: progress.progress,
+          ...(progress.total === undefined ? {} : { total: progress.total }),
+          ...(progress.message === undefined ? {} : { message: progress.message }),
+        },
+      });
+    };
+  }
+  if (ctx !== undefined) {
+    options.signal = ctx.mcpReq.signal;
+  }
+  return options;
+}
+
+async function waitForActiveCalls(
+  activeCalls: ReadonlySet<Promise<unknown>>,
+  limitMs: number,
+): Promise<void> {
+  if (activeCalls.size === 0) {
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, limitMs);
+  });
+  try {
+    await Promise.race([Promise.allSettled([...activeCalls]).then(() => undefined), limit]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
   const logger = options.logger ?? createLogger();
+  const naming: ToolNaming = options.config.toolNaming;
+  let serverRef: Server | undefined;
+
   const downstreams =
     options.downstreams ??
     (await connectAllDownstreams(options.config.mcpServers, {
       logger,
       ...(options.clientInfo === undefined ? {} : { clientInfo: options.clientInfo }),
+      onRestarted: async (connection) => {
+        if (serverRef === undefined) {
+          return;
+        }
+        rebuildRouting();
+        logger.child(connection.name).info('surfaces refreshed after restart');
+        await serverRef.sendToolListChanged();
+        await serverRef.sendResourceListChanged();
+        await serverRef.sendPromptListChanged();
+      },
     }));
 
   let routing: ToolRouting;
   try {
-    routing = buildToolRouting(downstreams.connections, options.config.toolNaming);
+    routing = buildToolRouting(downstreams.connections, naming);
   } catch (cause) {
     await downstreams.close();
     throw cause;
@@ -222,19 +345,17 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
         trustIdempotentHint: options.config.trustIdempotentHint,
         // The proxy owns the shared store and closes it once, after all guards.
         closeStore: false,
+        // C13: shutdown waits up to 10 s for in-flight calls.
+        closeTimeoutMs: SHUTDOWN_LIMIT_MS,
         hooks: {
-          onInDoubt: (event) =>
-            logger
-              .child(event.server)
-              .warn(
-                `record ${event.recordId ?? 'unknown'} is in doubt (${event.reason ?? event.type})`,
-              ),
-          onStoreWriteFailed: (event) =>
-            logger
-              .child(event.server)
-              .error(
-                `could not write record ${event.recordId ?? 'unknown'}: ${describeError(event.error)}`,
-              ),
+          onExecute: (event) => logGuardEvent(logger, event),
+          onDuplicate: (event) => logGuardEvent(logger, event),
+          onBlocked: (event) => logGuardEvent(logger, event),
+          onInDoubt: (event) => logGuardEvent(logger, event),
+          onLateCompletion: (event) => logGuardEvent(logger, event),
+          onStoreWriteFailed: (event) => logGuardEvent(logger, event),
+          onGuardBypassed: (event) => logGuardEvent(logger, event),
+          onWarning: (event) => logGuardEvent(logger, event),
         },
       }),
     );
@@ -244,9 +365,17 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     downstreams.connections.map((connection) => [connection.name, connection] as const),
   );
   const routes = new Map<string, ToolRoute>();
-  const collectExposedTools = (): Tool[] => {
+  const resourceByUri = new Map<string, ResourceRoute>();
+  const promptByName = new Map<string, PromptRoute>();
+  let exposed: Tool[] = [];
+  let exposedResources: Resource[] = [];
+  let exposedResourceTemplates: ResourceTemplateType[] = [];
+  let exposedPrompts: Prompt[] = [];
+
+  const rebuildRouting = (): void => {
+    routing = buildToolRouting(downstreams.connections, naming);
     routes.clear();
-    const exposed: Tool[] = [];
+    const tools: Tool[] = [];
     for (const entry of routing.entries) {
       const connection = connectionByName.get(entry.server);
       if (connection === undefined) {
@@ -258,10 +387,54 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       }
       routes.set(entry.exposedName, { connection, toolName: entry.toolName, tool });
       // Spread keeps description, inputSchema, annotations, and _meta exactly.
-      exposed.push({ ...tool, name: entry.exposedName });
+      tools.push({ ...tool, name: entry.exposedName });
     }
-    return exposed;
+    exposed = tools;
+
+    resourceByUri.clear();
+    const resources: Resource[] = [];
+    for (const connection of downstreams.connections) {
+      for (const resource of connection.resources) {
+        if (resourceByUri.has(resource.uri)) {
+          throw new ConfigInvalidError({
+            issues: [
+              `the resource "${resource.uri}" is exposed by both "${resourceByUri.get(resource.uri)?.connection.name}" and "${connection.name}"; rename one server or resource`,
+            ],
+          });
+        }
+        resourceByUri.set(resource.uri, { connection, resource });
+        resources.push({ ...resource, name: exposeName(connection.name, resource.name, naming) });
+      }
+    }
+    exposedResources = resources;
+
+    exposedResourceTemplates = downstreams.connections.flatMap((connection) =>
+      connection.resourceTemplates.map((template) => ({
+        ...template,
+        name: exposeName(connection.name, template.name, naming),
+      })),
+    );
+
+    promptByName.clear();
+    const prompts: Prompt[] = [];
+    for (const connection of downstreams.connections) {
+      for (const prompt of connection.prompts) {
+        const exposedName = exposeName(connection.name, prompt.name, naming);
+        if (promptByName.has(exposedName)) {
+          throw new ConfigInvalidError({
+            issues: [
+              `the prompt "${exposedName}" comes from both "${promptByName.get(exposedName)?.connection.name}" and "${connection.name}"; rename one of the prompts or servers`,
+            ],
+          });
+        }
+        promptByName.set(exposedName, { connection, prompt });
+        prompts.push({ ...prompt, name: exposedName });
+      }
+    }
+    exposedPrompts = prompts;
   };
+
+  rebuildRouting();
 
   const guardedCount = (connection: DownstreamConnection): number =>
     connection.tools.filter(
@@ -288,7 +461,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
         const lines = ['twiceshy status'];
         for (const connection of downstreams.connections) {
           lines.push(
-            `  ${connection.name}: connected, ${connection.tools.length} tools (${guardedCount(connection)} guarded)`,
+            `  ${connection.name}: ${connection.status}, ${connection.tools.length} tools (${guardedCount(connection)} guarded)`,
           );
         }
         for (const failure of downstreams.failures) {
@@ -324,41 +497,93 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
   const proxyToolByName = new Map<string, ProxyTool>();
   for (const tool of proxyTools) {
-    if (routing.byExposedName.has(tool.name)) {
+    if (routing.byExposedName.has(tool.name) || promptByName.has(tool.name)) {
       throw new ConfigInvalidError({
         issues: [
-          `toolNaming "${options.config.toolNaming}": the built-in tool "${tool.name}" collides with a downstream tool; rename the downstream tool or server`,
+          `toolNaming "${naming}": the built-in tool "${tool.name}" collides with a downstream surface; rename the downstream tool or server`,
         ],
       });
     }
     proxyToolByName.set(tool.name, tool);
   }
 
-  let exposed = collectExposedTools();
-
   const server = new Server(
     { name: 'twiceshy', version: PROXY_VERSION },
-    { capabilities: { tools: { listChanged: true } } },
+    {
+      capabilities: {
+        tools: { listChanged: true },
+        resources: { listChanged: true, subscribe: false },
+        prompts: { listChanged: true },
+        logging: {},
+      },
+    },
   );
+  serverRef = server;
+
+  const activeCalls = new Set<Promise<unknown>>();
+  let closing = false;
 
   server.setRequestHandler('tools/list', async () => ({
     tools: [...exposed, ...proxyTools.map(toProxyTool)],
   }));
 
-  const forwardCall = async (route: ToolRoute, request: CallToolRequest): Promise<CallToolResult> =>
-    route.connection.client.callTool({
-      name: route.toolName,
+  server.setRequestHandler('resources/list', async () => ({ resources: exposedResources }));
+
+  server.setRequestHandler('resources/templates/list', async () => ({
+    resourceTemplates: exposedResourceTemplates,
+  }));
+
+  server.setRequestHandler('resources/read', async (request) => {
+    const route = resourceByUri.get(request.params.uri);
+    if (route === undefined) {
+      throw new Error(
+        `Twiceshy: no configured server exposes the resource "${request.params.uri}".`,
+      );
+    }
+    return route.connection.client.readResource({ uri: route.resource.uri });
+  });
+
+  server.setRequestHandler('prompts/list', async () => ({ prompts: exposedPrompts }));
+
+  server.setRequestHandler('prompts/get', async (request) => {
+    const route = promptByName.get(request.params.name);
+    if (route === undefined) {
+      throw new Error(
+        `Twiceshy: no configured server exposes the prompt "${request.params.name}".`,
+      );
+    }
+    return route.connection.client.getPrompt({
+      name: route.prompt.name,
       ...(request.params.arguments === undefined ? {} : { arguments: request.params.arguments }),
-      ...(request.params._meta === undefined ? {} : { _meta: request.params._meta }),
     });
+  });
+
+  // Sampling and elicitation from downstream servers are refused (C13); the
+  // handlers live on the client side, where those server-to-client requests
+  // arrive. Registered with the other downstream handlers below.
+
+  const forwardCall = async (
+    route: ToolRoute,
+    request: CallToolRequest,
+    ctx: ServerContext,
+  ): Promise<CallToolResult> =>
+    route.connection.callTool(
+      {
+        name: route.toolName,
+        ...(request.params.arguments === undefined ? {} : { arguments: request.params.arguments }),
+        ...(request.params._meta === undefined ? {} : { _meta: request.params._meta }),
+      },
+      requestOptions(request.params._meta?.progressToken, ctx),
+    );
 
   /** Guarded call: classify a downstream `isError` result before it is stored. */
   const callGuarded = async (
     route: ToolRoute,
     request: CallToolRequest,
+    ctx: ServerContext,
     toolOptions: ToolOptions,
   ): Promise<CallToolResult> => {
-    const result = await forwardCall(route, request);
+    const result = await forwardCall(route, request, ctx);
     const classification = classifyToolResult(result, {
       treatToolErrorsAsDefinite: toolOptions.treatToolErrorsAsDefinite ?? false,
     });
@@ -372,7 +597,10 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     throw classification === 'definite' ? definiteFailure(failure) : failure;
   };
 
-  server.setRequestHandler('tools/call', async (request) => {
+  const handleCall = async (
+    request: CallToolRequest,
+    ctx: ServerContext,
+  ): Promise<CallToolResult> => {
     const name = request.params.name;
     const proxyTool = proxyToolByName.get(name);
     if (proxyTool !== undefined) {
@@ -398,12 +626,9 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     if (!decision.guarded || guard === undefined) {
       // C3: unguarded calls forward untouched and create no record.
       try {
-        return await forwardCall(route, request);
+        return await forwardCall(route, request, ctx);
       } catch (cause) {
-        return toolText(
-          `Twiceshy: the downstream server "${route.connection.name}" failed while calling "${route.toolName}": ${describeError(cause)}`,
-          true,
-        );
+        return downstreamUnavailable(route.connection.name, cause);
       }
     }
 
@@ -412,6 +637,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
         {
           tool: route.toolName,
           args: request.params.arguments ?? {},
+          signal: ctx.mcpReq.signal,
           ...(toolOptions.keyFields === undefined ? {} : { keyFields: toolOptions.keyFields }),
           ...(toolOptions.ignoreFields === undefined
             ? {}
@@ -419,7 +645,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
           ...(toolOptions.normalize === undefined ? {} : { normalize: toolOptions.normalize }),
           ...(toolOptions.timeoutMs === undefined ? {} : { timeoutMs: toolOptions.timeoutMs }),
         },
-        () => callGuarded(route, request, toolOptions),
+        () => callGuarded(route, request, ctx, toolOptions),
       );
       if (outcome.status === 'duplicate') {
         return duplicateResult(
@@ -438,10 +664,20 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       if (isTwiceshyError(cause)) {
         return blockedResult(cause);
       }
-      return toolText(
-        `Twiceshy: the downstream server "${route.connection.name}" failed while calling "${route.toolName}": ${describeError(cause)}`,
-        true,
-      );
+      return downstreamUnavailable(route.connection.name, cause);
+    }
+  };
+
+  server.setRequestHandler('tools/call', async (request, ctx) => {
+    if (closing) {
+      return toolText('Twiceshy is shutting down and is not accepting new calls.', true);
+    }
+    const call = handleCall(request, ctx);
+    activeCalls.add(call);
+    try {
+      return await call;
+    } finally {
+      activeCalls.delete(call);
     }
   });
 
@@ -449,8 +685,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     const child = logger.child(connection.name);
     try {
       connection.tools = await listAllTools(connection.client, 15_000);
-      routing = buildToolRouting(downstreams.connections, options.config.toolNaming);
-      exposed = collectExposedTools();
+      rebuildRouting();
       await server.sendToolListChanged();
       child.info(`tool list changed; now ${connection.tools.length} tool(s)`);
     } catch (cause) {
@@ -458,10 +693,59 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     }
   };
 
+  const refreshResources = async (connection: DownstreamConnection): Promise<void> => {
+    try {
+      connection.resources =
+        connection.client.getServerCapabilities()?.resources === undefined
+          ? []
+          : await listSurfaceResources(connection);
+      rebuildRouting();
+      await server.sendResourceListChanged();
+    } catch (cause) {
+      logger.child(connection.name).error(`could not refresh resources: ${describeError(cause)}`);
+    }
+  };
+
+  const refreshPrompts = async (connection: DownstreamConnection): Promise<void> => {
+    try {
+      connection.prompts =
+        connection.client.getServerCapabilities()?.prompts === undefined
+          ? []
+          : await listSurfacePrompts(connection);
+      rebuildRouting();
+      await server.sendPromptListChanged();
+    } catch (cause) {
+      logger.child(connection.name).error(`could not refresh prompts: ${describeError(cause)}`);
+    }
+  };
+
   for (const connection of downstreams.connections) {
     connection.client.setNotificationHandler('notifications/tools/list_changed', () =>
       refreshTools(connection),
     );
+    connection.client.setNotificationHandler('notifications/resources/list_changed', () =>
+      refreshResources(connection),
+    );
+    connection.client.setNotificationHandler('notifications/prompts/list_changed', () =>
+      refreshPrompts(connection),
+    );
+    connection.client.setNotificationHandler(
+      'notifications/resources/updated',
+      async (notification) => {
+        await server.sendResourceUpdated(notification.params);
+      },
+    );
+    connection.client.setNotificationHandler('notifications/message', async (notification) => {
+      await server.sendLoggingMessage(notification.params);
+    });
+    // Sampling and elicitation from this server are refused with a clear
+    // message naming the feature and the v1.1 plan (C13).
+    connection.client.setRequestHandler('sampling/createMessage', async () => {
+      throw unsupportedFeature('sampling');
+    });
+    connection.client.setRequestHandler('elicitation/create', async () => {
+      throw unsupportedFeature('elicitation');
+    });
   }
 
   logger.info(
@@ -475,6 +759,8 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     store,
     exposedTools: () => exposed,
     close: async () => {
+      closing = true;
+      await waitForActiveCalls(activeCalls, SHUTDOWN_LIMIT_MS);
       await Promise.all([...guards.values()].map((guard) => guard.close().catch(() => undefined)));
       await downstreams.close();
       await store.close();
@@ -487,6 +773,24 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
   };
 }
 
+/** Re-reads a connection's resources, treating an absent surface as empty. */
+async function listSurfaceResources(connection: DownstreamConnection): Promise<Resource[]> {
+  try {
+    return (await connection.client.listResources()).resources;
+  } catch {
+    return [];
+  }
+}
+
+/** Re-reads a connection's prompts, treating an absent surface as empty. */
+async function listSurfacePrompts(connection: DownstreamConnection): Promise<Prompt[]> {
+  try {
+    return (await connection.client.listPrompts()).prompts;
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Creates the proxy and serves it on stdio, which is how the agent's client
  * launches it. Tests and other embeddings pass an explicit transport.
@@ -495,7 +799,10 @@ export async function startProxy(
   options: ProxyOptions,
   transport?: Transport,
 ): Promise<ProxyHandle> {
-  const handle = await createProxy(options);
+  const logger = options.logger ?? createLogger();
+  // stdout carries MCP messages only: any SDK console output goes to stderr.
+  redirectConsoleToStderr(logger);
+  const handle = await createProxy({ ...options, logger });
   try {
     await handle.server.connect(transport ?? new StdioServerTransport());
   } catch (cause) {

@@ -1,52 +1,17 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
-import { execSync, spawn } from 'node:child_process';
-import {
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/client';
 import { afterEach, describe, expect, it } from 'vitest';
+import { CLI_PATH, ensureBuilt } from './helpers/built-binary.js';
 
-const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
-const CLI_PATH = join(REPO_ROOT, 'packages/mcp-proxy/dist/cli.js');
-const CORE_DIST = join(REPO_ROOT, 'packages/core/dist/index.js');
 const COUNTER_FIXTURE = fileURLToPath(new URL('./fixtures/counter-server.mjs', import.meta.url));
 
 const tempDirs = new Set<string>();
 const children = new Set<ChildProcessWithoutNullStreams>();
-
-function newestMtime(dir: string): number {
-  let newest = 0;
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    newest = Math.max(newest, entry.isDirectory() ? newestMtime(full) : statSync(full).mtimeMs);
-  }
-  return newest;
-}
-
-/** P9 tests the real binary, so make sure it reflects the current sources. */
-function ensureBuilt(): void {
-  const sourcesNewest = Math.max(
-    newestMtime(join(REPO_ROOT, 'packages/mcp-proxy/src')),
-    newestMtime(join(REPO_ROOT, 'packages/core/src')),
-  );
-  const builtNewest = Math.min(
-    existsSync(CLI_PATH) ? statSync(CLI_PATH).mtimeMs : 0,
-    existsSync(CORE_DIST) ? statSync(CORE_DIST).mtimeMs : 0,
-  );
-  if (existsSync(CLI_PATH) && existsSync(CORE_DIST) && builtNewest >= sourcesNewest) {
-    return;
-  }
-  execSync('pnpm build', { cwd: REPO_ROOT, stdio: 'pipe' });
-}
 
 afterEach(() => {
   for (const child of children) {

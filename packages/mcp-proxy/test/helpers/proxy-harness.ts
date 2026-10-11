@@ -11,10 +11,46 @@ export async function connectInProcess(
 ): Promise<DownstreamConnection> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
-  const client = new Client({ name: 'twiceshy-test-client', version: '1.0.0' });
+  const client = new Client(
+    { name: 'twiceshy-test-client', version: '1.0.0' },
+    { capabilities: { sampling: {}, elicitation: {} } },
+  );
   await client.connect(clientTransport);
   const tools = await listAllTools(client, 5_000);
-  return { name, client, tools };
+  const capabilities = client.getServerCapabilities();
+  const safeList = async <T>(load: () => Promise<T[]>): Promise<T[]> => {
+    try {
+      return await load();
+    } catch {
+      return [];
+    }
+  };
+  const resources =
+    capabilities?.resources === undefined
+      ? []
+      : await safeList(async () => (await client.listResources()).resources);
+  const resourceTemplates =
+    capabilities?.resources === undefined
+      ? []
+      : await safeList(async () => (await client.listResourceTemplates()).resourceTemplates);
+  const prompts =
+    capabilities?.prompts === undefined
+      ? []
+      : await safeList(async () => (await client.listPrompts()).prompts);
+  return {
+    name,
+    client,
+    tools,
+    resources,
+    resourceTemplates,
+    prompts,
+    status: 'connected',
+    failure: null,
+    callTool: (params, options) => client.callTool(params, options),
+    close: async () => {
+      await client.close();
+    },
+  };
 }
 
 export function inProcessDownstreams(connections: DownstreamConnection[]): Downstreams {
