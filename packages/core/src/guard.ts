@@ -136,6 +136,11 @@ export interface CreateGuardOptions {
   maxResultBytes?: number;
   /** Default per-call timeout. Default 30000. */
   timeoutMs?: number;
+  /**
+   * Claim duration. C6's default is timeoutMs + 30 s; tests use short leases
+   * such as "500ms" to prove crash recovery without waiting.
+   */
+  leaseMs?: number | string;
   /** How long close() waits for in-flight calls. Default 30000. */
   closeTimeoutMs?: number;
   /** Trust MCP idempotentHint annotations. Default true. */
@@ -158,6 +163,8 @@ interface NormalizedGuardOptions {
   waitForInFlightMs: number;
   maxResultBytes: number;
   timeoutMs: number;
+  /** Null means the C6 default: timeoutMs + 30 s. */
+  leaseMs: number | null;
   closeTimeoutMs: number;
   trustIdempotentHint: boolean;
   redact: readonly string[];
@@ -265,6 +272,17 @@ const durationSchema = z.custom<number | string>(
   { error: `${DURATION_EXPECTED}, for example "10m"` },
 );
 
+const positiveDurationSchema = z.custom<number | string>(
+  (value) => {
+    try {
+      return parseDuration(value) > 0;
+    } catch {
+      return false;
+    }
+  },
+  { error: 'expected a positive duration such as "500ms" or 60000' },
+);
+
 const hookSchema = z.custom<(event: GuardEvent) => void>((value) => typeof value === 'function', {
   error: 'expected a function, for example (event) => console.log(event.type)',
 });
@@ -332,6 +350,7 @@ const optionsSchema = z.object({
     .positive({ error: 'expected a positive number of bytes, for example 262144' })
     .optional(),
   timeoutMs: durationSchema.optional(),
+  leaseMs: positiveDurationSchema.optional(),
   closeTimeoutMs: durationSchema.optional(),
   trustIdempotentHint: z.boolean({ error: 'expected true or false, for example true' }).optional(),
   redact: z
@@ -415,6 +434,7 @@ function normalizeOptions(options: CreateGuardOptions): NormalizedGuardOptions {
     waitForInFlightMs: data.waitForInFlightMs ?? DEFAULT_WAIT_FOR_IN_FLIGHT_MS,
     maxResultBytes: data.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES,
     timeoutMs: parseDuration(data.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    leaseMs: data.leaseMs === undefined ? null : parseDuration(data.leaseMs),
     closeTimeoutMs: parseDuration(data.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS),
     trustIdempotentHint: data.trustIdempotentHint ?? true,
     redact: data.redact ?? [],
@@ -647,7 +667,7 @@ class DefaultGuard implements Guard {
     const settings: EngineSettings = {
       windowMs: this.options.windowMs,
       waitForInFlightMs: this.options.waitForInFlightMs,
-      leaseMs: timeoutMs + LEASE_SLACK_MS,
+      leaseMs: this.options.leaseMs ?? timeoutMs + LEASE_SLACK_MS,
     };
     const startedAt = this.options.clock.now();
     const fingerprintResult = computeFingerprint({

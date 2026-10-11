@@ -1,9 +1,11 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    // X2 to X4 are real multi-process stress tests with their own script.
+    exclude: [...configDefaults.exclude, '**/*.stress.test.ts'],
     coverage: {
       provider: 'v8',
       reporter: [['text', { skipFull: false }], 'json', 'html'],

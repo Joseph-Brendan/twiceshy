@@ -140,14 +140,64 @@ function migrate(db: SqliteDatabase): void {
   migrateTx.immediate();
 }
 
+/** C12: processes wait briefly for each other instead of failing. */
+const BUSY_TIMEOUT_MS = 5_000;
+
+/** Delay between journal-mode switch attempts while another process holds the lock. */
+const WAL_RETRY_DELAY_MS = 25;
+
+const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
+
+/** Synchronous sleep; openDatabase cannot await. Bounded by BUSY_TIMEOUT_MS. */
+function sleepSync(ms: number): void {
+  Atomics.wait(sleepBuffer, 0, 0, ms);
+}
+
+function isBusyError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === 'SQLITE_BUSY'
+  );
+}
+
+/**
+ * Switches the database to WAL mode, waiting out other processes switching
+ * the same fresh file (C12). SQLite does not run the busy handler while
+ * changing the journal mode, so the pragma can fail with SQLITE_BUSY even
+ * though busy_timeout is set; this waits and tries again within the same
+ * 5 s budget instead of failing.
+ */
+function enableWal(db: SqliteDatabase): void {
+  const deadline = Date.now() + BUSY_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const mode = db.pragma('journal_mode = WAL', { simple: true });
+      if (mode === 'wal') {
+        return;
+      }
+    } catch (cause) {
+      if (!isBusyError(cause) || Date.now() >= deadline) {
+        throw cause;
+      }
+    }
+    if (Date.now() >= deadline) {
+      throw new Error('the database stayed locked while switching to WAL mode');
+    }
+    sleepSync(WAL_RETRY_DELAY_MS);
+  }
+}
+
 function openDatabase(Database: typeof BetterSqlite3, path: string): SqliteDatabase {
   let db: SqliteDatabase | undefined;
   try {
     mkdirSync(dirname(path), { recursive: true });
-    db = new Database(path);
-    // WAL plus a busy timeout lets several processes share one file (C12).
-    db.pragma('journal_mode = WAL');
-    db.pragma('busy_timeout = 5000');
+    // The timeout is set at open time and again explicitly, so every lock
+    // acquisition can wait instead of failing (C12).
+    db = new Database(path, { timeout: BUSY_TIMEOUT_MS });
+    db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    // WAL lets several processes share one file (C12).
+    enableWal(db);
     migrate(db);
     return db;
   } catch (cause) {

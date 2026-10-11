@@ -209,6 +209,20 @@ describe.each(STORE_CASES)('guard with $name', ({ createStore }) => {
     expect(outcome.value).toBe('finally done');
   });
 
+  it('a leaseMs override replaces the timeoutMs + 30s default', async () => {
+    const store = createStore();
+    const clock = makeClock();
+    const guard = makeGuard(store, clock, { leaseMs: '500ms', timeoutMs: 60_000 });
+
+    const running = controlled<string>();
+    const call = guard.run({ tool: 'pay.tool', args: {} }, () => running.promise);
+    await flushAsync();
+    const [record] = await guard.list({});
+    expect(record?.leaseExpiresAt?.getTime()).toBe(NOW.getTime() + 500);
+    running.resolve('done');
+    await call;
+  });
+
   it('D5: late completion after a timeout upgrades IN_DOUBT and emits the event', async () => {
     const store = createStore();
     const clock = makeClock();
@@ -806,6 +820,7 @@ describe('createGuard options', () => {
       onStoreFailure: 'maybe',
       waitForInFlightMs: 1.5,
       maxResultBytes: 0,
+      leaseMs: 0,
       trustIdempotentHint: 'yes',
       redact: [123],
       classifyError: 'not a function',
@@ -829,6 +844,7 @@ describe('createGuard options', () => {
       'onStoreFailure',
       'waitForInFlightMs',
       'maxResultBytes',
+      'leaseMs',
       'trustIdempotentHint',
       'redact',
       'classifyError',
