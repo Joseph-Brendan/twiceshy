@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use Twiceshy in research or production, please cite it as below."
+title: "Twiceshy: Repeat-Action Guard for AI Agents"
+authors:
+  - family-names: "Brendan"
+    given-names: "Joseph"
+    affiliation: "Dev and Design HQ"
+date-released: 2026-10-11
+url: "https://github.com/twiceshy/twiceshy"
+license: "MIT"
+abstract: "A zero-setup, local-first repeat-action guard that prevents AI agents from executing duplicate side-effects (payments, refunds, messages) with an honest in-doubt safety model."
+keywords:
+  - "ai agents"
+  - "idempotency"
+  - "model context protocol"
+  - "mcp"
+  - "safety"
