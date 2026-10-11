@@ -398,6 +398,15 @@ describe('L1: commands, help, JSON, and exit codes', () => {
     ).toBe(1);
     expect(missingShow.errors()).toContain('was not found');
 
+    const missingResolve = capture();
+    expect(
+      await runCli(['resolve', 'nope', '--succeeded', '--by', 'kola', '--config', config], {
+        io: missingResolve.io,
+        logger: silentLogger(),
+      }),
+    ).toBe(1);
+    expect(missingResolve.errors()).toContain('was not found');
+
     const missingAllow = capture();
     expect(
       await runCli(['allow', 'missing-fingerprint', '--by', 'kola', '--config', config], {
@@ -442,6 +451,21 @@ describe('L3: purge confirmation', () => {
       }),
     ).toBe(0);
     expect(JSON.parse(captured.text())).toMatchObject({ ok: true, removed: 1, confirmed: true });
+  });
+
+  it('L3: purge --yes reports one removed record in plain words', async () => {
+    const dbPath = join(tempDir(), 'actions.db');
+    await seedOldRecord(dbPath);
+    const config = writeConfig({ store: { type: 'sqlite', path: dbPath }, mcpServers: {} });
+
+    const captured = capture();
+    expect(
+      await runCli(['purge', '--yes', '--config', config], {
+        io: captured.io,
+        logger: silentLogger(),
+      }),
+    ).toBe(0);
+    expect(captured.text()).toBe('Removed 1 record.\n');
   });
 });
 

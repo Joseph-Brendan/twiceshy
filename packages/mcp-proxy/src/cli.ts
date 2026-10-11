@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { homedir } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
@@ -10,7 +11,7 @@ import type { ProxyConfig } from './config.js';
 import { loadConfigFile } from './config.js';
 import { connectAllDownstreams } from './downstream.js';
 import type { Logger, LogLevel } from './logger.js';
-import { createLogger, isLogLevel } from './logger.js';
+import { createLogger, isLogLevel, nullLogStream } from './logger.js';
 import { createActionStore, guardAnnotations, startProxy } from './proxy.js';
 import { PROXY_VERSION } from './version.js';
 
@@ -46,6 +47,7 @@ export interface CliDependencies {
   logger?: Logger;
   io?: CliIo;
   cwd?: string;
+  home?: string;
   now?: () => Date;
 }
 
@@ -247,7 +249,9 @@ function durationValue(values: Record<string, unknown>, key: string): number | u
 function configFor(values: Record<string, unknown>, deps: CliDependencies): ProxyConfig {
   const base = deps.cwd ?? process.cwd();
   const path = stringValue(values, 'config') ?? 'twiceshy.config.json';
-  return loadConfigFile(resolvePath(base, path));
+  return loadConfigFile(resolvePath(base, path), {
+    ...(deps.home === undefined ? {} : { home: deps.home }),
+  });
 }
 
 async function withGuard<T>(
@@ -365,7 +369,36 @@ interface DoctorToolReport {
 
 type DoctorServerReport =
   | { name: string; status: 'connected'; tools: DoctorToolReport[] }
-  | { name: string; status: 'failed'; what: string; why: string; fix: string };
+  | {
+      name: string;
+      status: 'failed';
+      what: string;
+      why: string;
+      fix: string;
+      target: string;
+      targetKind: 'command' | 'url';
+      stderr: string[];
+    };
+
+interface DoctorStoreReport {
+  type: 'sqlite' | 'memory';
+  path?: string;
+  inDoubt: number;
+}
+
+interface DoctorSummary {
+  connected: number;
+  failed: number;
+  guarded: number;
+  open: number;
+  warnings: number;
+}
+
+interface DoctorReport {
+  store: DoctorStoreReport;
+  servers: DoctorServerReport[];
+  summary: DoctorSummary;
+}
 
 function freeTextWarning(tool: Tool): string[] {
   const properties = tool.inputSchema?.properties;
@@ -402,13 +435,58 @@ function wrapText(text: string, width: number, indent: string): string[] {
   return lines;
 }
 
-function renderDoctor(servers: readonly DoctorServerReport[], inDoubt: number): string {
+function displayPath(path: string, home: string): string {
+  if (path === home) {
+    return '~';
+  }
+  if (path.startsWith(`${home}/`) || path.startsWith(`${home}\\`)) {
+    return `~${path.slice(home.length)}`;
+  }
+  return path;
+}
+
+function plural(count: number, singular: string, pluralForm: string): string {
+  return count === 1 ? singular : pluralForm;
+}
+
+function summaryLine(summary: DoctorSummary): string {
+  const total = summary.connected + summary.failed;
+  return (
+    `${summary.connected} of ${total} ${plural(total, 'server', 'servers')} connected. ` +
+    `${summary.guarded} ${plural(summary.guarded, 'tool', 'tools')} guarded, ${summary.open} open. ` +
+    `${summary.warnings} ${plural(summary.warnings, 'warning', 'warnings')}.`
+  );
+}
+
+function renderDoctor(report: DoctorReport, home: string): string {
+  const { store, servers, summary } = report;
   const nameWidth = Math.min(Math.max(...servers.map((server) => server.name.length + 2), 14), 24);
   const toolNames = servers.flatMap((server) =>
     server.status === 'connected' ? server.tools.map((tool) => tool.name) : [],
   );
   const toolWidth = Math.min(Math.max(...toolNames.map((name) => name.length), 10), 30);
   const lines: string[] = [];
+
+  // Store line first.
+  const storeCount = `${store.inDoubt} ${plural(store.inDoubt, 'record', 'records')} in doubt`;
+  const typeText = store.type.padEnd(8);
+  let storePath = '';
+  if (store.path !== undefined) {
+    const budget = Math.max(12, 80 - 'Store    '.length - typeText.length - storeCount.length - 4);
+    storePath = `${shorten(displayPath(store.path, home), budget)}  `;
+  }
+  lines.push(`Store    ${typeText}${storePath}${storeCount}`);
+  if (store.inDoubt > 0) {
+    lines.push(
+      ...wrapText(
+        'Records are in doubt. Run "twiceshy list --state IN_DOUBT" to review them.',
+        80,
+        '',
+      ),
+    );
+  }
+  lines.push('');
+
   for (const server of servers) {
     if (server.status === 'connected') {
       lines.push(
@@ -420,18 +498,30 @@ function renderDoctor(servers: readonly DoctorServerReport[], inDoubt: number): 
             `${(tool.guarded ? 'GUARDED' : 'open').padEnd(11)}(${tool.reason})`,
         );
         for (const warning of tool.warnings) {
-          lines.push(...wrapText(`WARNING ${tool.name}: ${warning}`, 78, '  '));
+          lines.push(...wrapText(`Warning: ${warning}`, 80, '    '));
         }
       }
     } else {
       const prefix = `${shorten(server.name, nameWidth - 2).padEnd(nameWidth)}FAILED      `;
+      const indent = ' '.repeat(nameWidth);
       lines.push(...wrapText(server.what, Math.max(20, 80 - prefix.length), prefix));
-      lines.push(...wrapText(`Why: ${server.why}`, 80 - nameWidth, ' '.repeat(nameWidth)));
-      lines.push(...wrapText(`Fix: ${server.fix}`, 80 - nameWidth, ' '.repeat(nameWidth)));
+      lines.push(
+        ...wrapText(
+          `${server.targetKind === 'command' ? 'Command' : 'URL'}: ${server.target}`,
+          Math.max(20, 80 - indent.length),
+          indent,
+        ),
+      );
+      lines.push(...wrapText(`Why: ${server.why}`, 80 - nameWidth, indent));
+      for (const stderrLine of server.stderr) {
+        lines.push(...wrapText(stderrLine, 80 - nameWidth - 2, `${indent}  `));
+      }
+      lines.push(...wrapText(`Fix: ${server.fix}`, 80 - nameWidth, indent));
     }
   }
+
   lines.push('');
-  lines.push(`records in doubt: ${inDoubt}`);
+  lines.push(...wrapText(summaryLine(summary), 80, ''));
   return `${lines.join('\n')}\n`;
 }
 
@@ -441,9 +531,13 @@ async function commandDoctor(
   io: CliIo,
   logger: Logger,
 ): Promise<number> {
+  const json = booleanValue(values, 'json');
+  // Structured logs only when asked for; never alongside a JSON report.
+  const wantsLogs = (logger.level === 'info' || logger.level === 'debug') && !json;
+  const reportLogger = wantsLogs ? logger : createLogger({ level: 'error', stream: nullLogStream });
   const config = configFor(values, deps);
-  const downstreams = await connectAllDownstreams(config.mcpServers, { logger });
-  const store = createActionStore(config.store, logger);
+  const downstreams = await connectAllDownstreams(config.mcpServers, { logger: reportLogger });
+  const store = createActionStore(config.store, reportLogger);
   try {
     const inDoubt = (await store.list({ state: 'IN_DOUBT' })).length;
     const servers: DoctorServerReport[] = [];
@@ -470,10 +564,28 @@ async function commandDoctor(
     for (const failure of downstreams.failures) {
       servers.push({ ...failure, status: 'failed' });
     }
-    if (booleanValue(values, 'json')) {
-      io.out(`${JSON.stringify({ servers, inDoubt }, null, 2)}\n`);
+
+    const allTools = servers.flatMap((server) =>
+      server.status === 'connected' ? server.tools : [],
+    );
+    const summary: DoctorSummary = {
+      connected: downstreams.connections.length,
+      failed: downstreams.failures.length,
+      guarded: allTools.filter((tool) => tool.guarded).length,
+      open: allTools.filter((tool) => !tool.guarded).length,
+      warnings: allTools.reduce((total, tool) => total + tool.warnings.length, 0),
+    };
+    const storeReport: DoctorStoreReport = {
+      type: config.store.type,
+      ...(config.store.type === 'sqlite' ? { path: config.store.path } : {}),
+      inDoubt,
+    };
+    const report: DoctorReport = { store: storeReport, servers, summary };
+
+    if (json) {
+      io.out(`${JSON.stringify(report, null, 2)}\n`);
     } else {
-      io.out(renderDoctor(servers, inDoubt));
+      io.out(renderDoctor(report, deps.home ?? homedir()));
     }
     return downstreams.failures.length === 0 ? 0 : 1;
   } finally {

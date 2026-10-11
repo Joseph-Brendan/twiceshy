@@ -18,6 +18,7 @@ import {
 } from './helpers/proxy-harness.js';
 
 const CRASHY_FIXTURE = fileURLToPath(new URL('./fixtures/crashy-server.mjs', import.meta.url));
+const SURFACES_FIXTURE = fileURLToPath(new URL('./fixtures/surfaces-server.mjs', import.meta.url));
 
 const tempDirs = new Set<string>();
 const proxies = new Set<ProxyHandle>();
@@ -97,6 +98,22 @@ describe('proxy resilience', () => {
 
     const listed = await client.listTools();
     expect(listed.tools.map((tool) => tool.name)).toContain('crashy__ping');
+  });
+
+  it('connects to a spawned server and loads its resources and prompts', async () => {
+    const config = loadConfig({
+      store: { type: 'memory' },
+      mcpServers: {
+        surfaces: { command: process.execPath, args: [SURFACES_FIXTURE] },
+      },
+    });
+    const proxy = await createProxy({ config, logger: silentLogger() });
+    proxies.add(proxy);
+
+    await waitUntil(() => (proxy.connections[0]?.resources.length ?? 0) > 0, 10_000);
+    expect(proxy.connections[0]?.resources).toHaveLength(1);
+    expect(proxy.connections[0]?.resourceTemplates).toHaveLength(1);
+    expect(proxy.connections[0]?.prompts).toHaveLength(1);
   });
 
   it('gives up after five failed restarts and reports the server as failed', async () => {

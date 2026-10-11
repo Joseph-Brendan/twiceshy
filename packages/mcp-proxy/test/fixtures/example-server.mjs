@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { Server } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
@@ -73,5 +74,9 @@ export function createExampleServer() {
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const pidFile = process.env.TWICESHY_EXAMPLE_PID_FILE;
+  if (pidFile !== undefined) {
+    writeFileSync(pidFile, String(process.pid));
+  }
   await createExampleServer().connect(new StdioServerTransport());
 }

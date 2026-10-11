@@ -1,4 +1,5 @@
 import type { Writable } from 'node:stream';
+import { Writable as WritableStream } from 'node:stream';
 
 /**
  * The one logging path for the proxy package (C13/C15). Everything goes to
@@ -41,6 +42,13 @@ export interface LoggerOptions {
 export function isLogLevel(value: unknown): value is LogLevel {
   return typeof value === 'string' && (LOG_LEVELS as readonly string[]).includes(value);
 }
+
+/** A stream that discards everything; used to silence logs on request. */
+export const nullLogStream: Writable = new WritableStream({
+  write(_chunk, _encoding, callback) {
+    callback();
+  },
+});
 
 /**
  * The MCP SDK occasionally writes diagnostics with console.log/debug, which

@@ -1,3 +1,4 @@
+import type { ChildProcess } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import type {
   CallToolRequestOptions,
@@ -11,8 +12,8 @@ import type {
   Transport,
 } from '@modelcontextprotocol/client';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import type { StdioServerParameters } from '@modelcontextprotocol/client/stdio';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { DownstreamUnavailableError } from 'twiceshy';
 import type { ServerConfig } from './config.js';
 import type { Logger } from './logger.js';
 import { RestartScheduler } from './restart.js';
@@ -47,6 +48,22 @@ export interface DownstreamFailure {
   what: string;
   why: string;
   fix: string;
+  /** The exact command line or URL that was tried. */
+  target: string;
+  targetKind: 'command' | 'url';
+  /** Last lines the stdio server wrote to stderr, newest last. */
+  stderr: string[];
+}
+
+/** Startup failure with the doctor-facing details attached. */
+export class DownstreamStartupError extends Error {
+  readonly failure: DownstreamFailure;
+
+  constructor(failure: DownstreamFailure) {
+    super(failure.what);
+    this.name = 'DownstreamStartupError';
+    this.failure = failure;
+  }
 }
 
 export interface Downstreams {
@@ -105,14 +122,81 @@ function forwardStderr(stream: Readable, logger: Logger): void {
   });
 }
 
+/** Startup diagnostics for one server: exit status and the stderr tail. */
+export interface TransportDiagnostics {
+  exitCode: number | null;
+  exitSignal: NodeJS.Signals | null;
+  readonly stderr: string[];
+}
+
+export interface DownstreamTransport {
+  transport: Transport;
+  diagnostics: TransportDiagnostics;
+}
+
+const STDERR_TAIL_LIMIT = 5;
+
+function pushStderrLine(tail: string[], line: string): void {
+  tail.push(line);
+  if (tail.length > STDERR_TAIL_LIMIT) {
+    tail.shift();
+  }
+}
+
+/**
+ * A StdioClientTransport that remembers why its process died. The SDK does
+ * not expose the child process, so this reads its private handle defensively;
+ * when that is unavailable the doctor still shows stderr and a generic reason.
+ */
+class DiagnosticStdioTransport extends StdioClientTransport {
+  readonly diagnostics: TransportDiagnostics = { exitCode: null, exitSignal: null, stderr: [] };
+
+  constructor(params: StdioServerParameters) {
+    super(params);
+    const stderr = this.stderr;
+    if (stderr !== null) {
+      let buffer = '';
+      stderr.on('data', (chunk: Buffer | string) => {
+        buffer += chunk.toString();
+        let index = buffer.indexOf('\n');
+        while (index !== -1) {
+          const line = buffer.slice(0, index);
+          buffer = buffer.slice(index + 1);
+          if (line.length > 0) {
+            pushStderrLine(this.diagnostics.stderr, line);
+          }
+          index = buffer.indexOf('\n');
+        }
+      });
+      stderr.on('end', () => {
+        if (buffer.length > 0) {
+          pushStderrLine(this.diagnostics.stderr, buffer);
+        }
+        buffer = '';
+      });
+    }
+  }
+
+  override async start(): Promise<void> {
+    await super.start();
+    const child = (this as unknown as { _process?: ChildProcess })._process;
+    if (child !== undefined) {
+      child.once('exit', (code, signal) => {
+        this.diagnostics.exitCode = code;
+        this.diagnostics.exitSignal = signal;
+      });
+    }
+  }
+}
+
 /** Builds the transport for one configured server (stdio or Streamable HTTP). */
 export function createDownstreamTransport(
   name: string,
   config: ServerConfig,
   logger: Logger,
-): Transport {
+): DownstreamTransport {
   if (config.kind === 'stdio') {
-    const transport = new StdioClientTransport({
+    const transport = new DiagnosticStdioTransport({
       command: config.command,
       args: [...config.args],
       env: { ...parentEnvironment(), ...config.env },
@@ -123,9 +207,85 @@ export function createDownstreamTransport(
     if (stderr !== null) {
       forwardStderr(stderr as Readable, logger.child(name));
     }
-    return transport;
+    return { transport, diagnostics: transport.diagnostics };
   }
-  return new StreamableHTTPClientTransport(new URL(config.url));
+  return {
+    transport: new StreamableHTTPClientTransport(new URL(config.url)),
+    diagnostics: { exitCode: null, exitSignal: null, stderr: [] },
+  };
+}
+
+function errorCodeOf(error: unknown): string | undefined {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === 'string' ? code : undefined;
+  }
+  return undefined;
+}
+
+function nestedErrorCode(error: unknown): string | undefined {
+  return error instanceof Error ? errorCodeOf(error.cause) : undefined;
+}
+
+function serverTarget(config: ServerConfig): { target: string; targetKind: 'command' | 'url' } {
+  return config.kind === 'stdio'
+    ? { target: [config.command, ...config.args].join(' '), targetKind: 'command' }
+    : { target: config.url, targetKind: 'url' };
+}
+
+/** The real reason a server failed to start, in plain words. */
+function startupReason(
+  config: ServerConfig,
+  cause: unknown,
+  diagnostics: TransportDiagnostics,
+  timeoutMs: number,
+): string {
+  const code = errorCodeOf(cause);
+  const nested = nestedErrorCode(cause);
+  const message = describeError(cause);
+  if (code === 'ENOENT' || message.includes('ENOENT')) {
+    const command = config.kind === 'stdio' ? config.command : config.url;
+    return `command not found: ${command}`;
+  }
+  if (config.kind === 'stdio' && diagnostics.exitCode !== null) {
+    return `process exited with code ${diagnostics.exitCode}`;
+  }
+  if (config.kind === 'stdio' && diagnostics.exitSignal !== null) {
+    return `process exited after signal ${diagnostics.exitSignal}`;
+  }
+  if (code === 'CONNECTION_CLOSED' || /connection closed/i.test(message)) {
+    return 'the server exited before the MCP handshake finished';
+  }
+  if (nested === 'ECONNREFUSED' || code === 'ECONNREFUSED' || message.includes('ECONNREFUSED')) {
+    return 'connection refused';
+  }
+  if (code === 'REQUEST_TIMEOUT' || /timed out|timeout/i.test(message)) {
+    return `timed out after ${Math.round(timeoutMs / 1000)} s`;
+  }
+  return code === undefined ? message : `${message} (${code})`;
+}
+
+/** Builds the doctor-facing startup failure for one server. */
+export function startupFailure(
+  name: string,
+  config: ServerConfig,
+  cause: unknown,
+  diagnostics: TransportDiagnostics,
+  timeoutMs: number,
+): DownstreamFailure {
+  const { target, targetKind } = serverTarget(config);
+  return {
+    name,
+    what: `The downstream MCP server "${name}" failed to start.`,
+    why: startupReason(config, cause, diagnostics, timeoutMs),
+    fix:
+      config.kind === 'stdio'
+        ? 'Check the command and arguments, or remove this server from the config.'
+        : 'Check the URL, or remove this server from the config.',
+    target,
+    targetKind,
+    stderr: [...diagnostics.stderr],
+  };
 }
 
 /**
@@ -180,6 +340,7 @@ class ManagedConnection implements DownstreamConnection {
   private closed = false;
   private restarting = false;
   private connectedOnce = false;
+  private diagnostics: TransportDiagnostics = { exitCode: null, exitSignal: null, stderr: [] };
 
   constructor(
     name: string,
@@ -206,8 +367,15 @@ class ManagedConnection implements DownstreamConnection {
     } catch (error) {
       // A startup failure is reported, not restarted (C13). Close the
       // half-built connection so no backoff timer lingers behind it.
+      const failure = startupFailure(
+        name,
+        config,
+        error,
+        connection.diagnostics,
+        options.connectTimeoutMs ?? 15_000,
+      );
       await connection.close();
-      throw error;
+      throw new DownstreamStartupError(failure);
     }
     return connection;
   }
@@ -244,7 +412,12 @@ class ManagedConnection implements DownstreamConnection {
     });
     client.onclose = () => this.handleTransportClose();
     this.client = client;
-    const transport = createDownstreamTransport(this.name, this.config, this.options.logger);
+    const { transport, diagnostics } = createDownstreamTransport(
+      this.name,
+      this.config,
+      this.options.logger,
+    );
+    this.diagnostics = diagnostics;
     await client.connect(transport, { timeout: this.options.connectTimeoutMs ?? 15_000 });
     await this.reloadSurfaces();
     this.status = 'connected';
@@ -338,8 +511,16 @@ class ManagedConnection implements DownstreamConnection {
   }
 
   private failureFor(cause: unknown): DownstreamFailure {
-    const error = new DownstreamUnavailableError({ server: this.name, cause });
-    return { name: this.name, what: error.what, why: error.why, fix: error.fix };
+    const { target, targetKind } = serverTarget(this.config);
+    return {
+      name: this.name,
+      what: `The downstream MCP server "${this.name}" is unavailable.`,
+      why: describeError(cause),
+      fix: 'Check the command or URL in the config.',
+      target,
+      targetKind,
+      stderr: [...this.diagnostics.stderr],
+    };
   }
 }
 
@@ -362,9 +543,18 @@ export async function connectDownstream(
     const connection = await ManagedConnection.start(name, config, options, failures);
     return { ok: true, connection };
   } catch (cause) {
-    const error = new DownstreamUnavailableError({ server: name, cause });
-    options.logger.error(`${error.what} Why: ${error.why} Fix: ${error.fix}`);
-    return { ok: false, failure: { name, what: error.what, why: error.why, fix: error.fix } };
+    const failure =
+      cause instanceof DownstreamStartupError
+        ? cause.failure
+        : startupFailure(
+            name,
+            config,
+            cause,
+            { exitCode: null, exitSignal: null, stderr: [] },
+            options.connectTimeoutMs ?? 15_000,
+          );
+    options.logger.error(`${failure.what} Why: ${failure.why} Fix: ${failure.fix}`);
+    return { ok: false, failure };
   }
 }
 
