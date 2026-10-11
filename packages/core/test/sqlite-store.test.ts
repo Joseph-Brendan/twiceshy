@@ -1,6 +1,7 @@
 import {
   copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -85,6 +86,22 @@ describe('SqliteStore opening', () => {
     const store = new SqliteStore({ path });
     expect(existsSync(path)).toBe(true);
     await store.close();
+  });
+
+  it('opens a database in a folder whose name has a space and a non-English character', async () => {
+    const dir = join(tempDir(), 'dir with space é');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, 'actions.db');
+
+    const store = new SqliteStore({ path });
+    const record = await executeOnce(store, 'fp-unicode-path');
+    await store.complete(record.id, completeInput({ type: 'success', result: { ok: true } }));
+    expect((await store.get(record.id))?.state).toBe('SUCCEEDED');
+    await store.close();
+
+    const reopened = new SqliteStore({ path });
+    expect((await reopened.get(record.id))?.state).toBe('SUCCEEDED');
+    await reopened.close();
   });
 
   it('S2: throws STORE_UNAVAILABLE with the full path when the file cannot be created', () => {

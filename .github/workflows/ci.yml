@@ -37,17 +37,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Resolve exact Node.js version
+        id: node-version
+        shell: bash
+        run: echo "exact=$(node -p 'process.version.slice(1)')" >> "$GITHUB_OUTPUT"
+
       - name: Typecheck
-        run: pnpm typecheck
+        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} typecheck
 
       - name: Lint
-        run: pnpm lint
+        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} lint
 
       - name: Test
-        run: pnpm test
+        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} test
 
       - name: Build
-        run: pnpm build
+        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} build
 
       - name: Check package
-        run: pnpm check:package
+        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} check:package
