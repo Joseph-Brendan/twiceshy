@@ -2,9 +2,15 @@ packages:
   - 'packages/*'
   - 'examples/*'
 
-# Allow the native build scripts that pnpm 10 blocks by default.
-onlyBuiltDependencies:
+# better-sqlite3 ships prebuilt binaries for every supported platform, so its
+# build script must stay off: pnpm 10 sees binding.gyp in the tarball and would
+# run node-gyp, which needs a C++ toolchain (MSVC on Windows). Real users have
+# no compiler, so the prebuilt binary must be used instead.
+ignoredBuiltDependencies:
   - better-sqlite3
+
+# esbuild's postinstall only places its prebuilt binary; no compiler needed.
+onlyBuiltDependencies:
   - esbuild
 
 # better-sqlite3 13 ships prebuilt binaries that require Node-API 10, which
