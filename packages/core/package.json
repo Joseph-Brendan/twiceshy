@@ -2,8 +2,20 @@
   "name": "twiceshy",
   "version": "0.0.0",
   "description": "Zero-setup repeat-action guard for AI agents",
+  "keywords": [
+    "mcp",
+    "ai-agents",
+    "idempotency",
+    "retries",
+    "duplicate-prevention"
+  ],
   "author": "Joseph Brendan",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Joseph-Brendan/twiceshy.git",
+    "directory": "packages/core"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -35,7 +47,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "typesVersions": {
     "*": {

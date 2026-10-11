@@ -2,11 +2,24 @@
   "name": "@twiceshy/mcp-proxy",
   "version": "0.0.0",
   "description": "MCP proxy with repeat-action guard",
+  "keywords": [
+    "mcp",
+    "ai-agents",
+    "idempotency",
+    "retries",
+    "duplicate-prevention"
+  ],
   "author": "Joseph Brendan",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Joseph-Brendan/twiceshy.git",
+    "directory": "packages/mcp-proxy"
+  },
   "type": "module",
   "bin": {
-    "twiceshy": "./dist/cli.js"
+    "twiceshy": "./dist/cli.js",
+    "mcp-proxy": "./dist/cli.js"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -25,7 +38,9 @@
   },
   "files": [
     "dist",
-    "schema.json"
+    "schema.json",
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22.14.0"
@@ -38,8 +53,8 @@
     "check:package": "publint && attw --pack ."
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "^2.3.1",
-    "@modelcontextprotocol/server": "^2.3.1",
+    "@modelcontextprotocol/client": "~2.3.1",
+    "@modelcontextprotocol/server": "~2.3.1",
     "better-sqlite3": "^13.0.3",
     "twiceshy": "workspace:*",
     "zod": "^4.6.5"

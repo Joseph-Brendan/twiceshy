@@ -56,3 +56,6 @@ jobs:
 
       - name: Check package
         run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} check:package
+
+      - name: Pack and install test
+        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} test:pack

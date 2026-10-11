@@ -64,10 +64,10 @@ importers:
   packages/mcp-proxy:
     dependencies:
       '@modelcontextprotocol/client':
-        specifier: ^2.3.1
+        specifier: ~2.3.1
         version: 2.3.1
       '@modelcontextprotocol/server':
-        specifier: ^2.3.1
+        specifier: ~2.3.1
         version: 2.3.1
       better-sqlite3:
         specifier: ^13.0.3
