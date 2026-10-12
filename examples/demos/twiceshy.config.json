@@ -1,0 +1,4 @@
+{
+  "store": { "type": "sqlite", "path": "./demo.db" },
+  "mcpServers": {}
+}

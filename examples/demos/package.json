@@ -1,0 +1,21 @@
+{
+  "name": "@twiceshy/example-demos",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Runnable demos from the Twiceshy launch guide.",
+  "type": "module",
+  "scripts": {
+    "demo1": "node demo1.js",
+    "demo2": "node demo2.js",
+    "demo3": "node demo3.js",
+    "demo4": "node demo4.js",
+    "demo5": "node demo5.js",
+    "demo6": "node demo6.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "~2.3.1",
+    "@twiceshy/mcp-proxy": "workspace:*",
+    "better-sqlite3": "^12.11.1",
+    "twiceshy": "workspace:*"
+  }
+}

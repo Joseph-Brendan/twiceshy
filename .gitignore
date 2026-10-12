@@ -13,3 +13,5 @@ reports/
 stryker.log
 scratch/
 .twiceshy-build.lock
+examples/demos/proxy.config.json
+examples/demos/counter.txt
