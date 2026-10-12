@@ -9,6 +9,7 @@ import type { ActionRecord, Guard, ListFilter, RecordState } from 'twiceshy';
 import { createGuard, isTwiceshyError, parseDuration, shouldGuard } from 'twiceshy';
 import type { ProxyConfig } from './config.js';
 import { loadConfigFile } from './config.js';
+import type { SurfaceFailure } from './downstream.js';
 import { connectAllDownstreams } from './downstream.js';
 import type { Logger, LogLevel } from './logger.js';
 import { createLogger, isLogLevel, nullLogStream } from './logger.js';
@@ -369,7 +370,12 @@ interface DoctorToolReport {
 }
 
 type DoctorServerReport =
-  | { name: string; status: 'connected'; tools: DoctorToolReport[] }
+  | {
+      name: string;
+      status: 'connected';
+      tools: DoctorToolReport[];
+      surfaceFailures: SurfaceFailure[];
+    }
   | {
       name: string;
       status: 'failed';
@@ -502,6 +508,11 @@ function renderDoctor(report: DoctorReport, home: string): string {
           lines.push(...wrapText(`Warning: ${warning}`, 80, '    '));
         }
       }
+      for (const failure of server.surfaceFailures) {
+        lines.push(
+          ...wrapText(`Warning: could not list ${failure.surface}: ${failure.message}`, 80, '    '),
+        );
+      }
     } else {
       const prefix = `${shorten(server.name, nameWidth - 2).padEnd(nameWidth)}FAILED      `;
       const indent = ' '.repeat(nameWidth);
@@ -542,6 +553,7 @@ async function commandDoctor(
     maskSecrets: createSecretMasker(config.resolvedEnvValues),
   });
   const store = createActionStore(config.store, reportLogger);
+  const maskSecrets = createSecretMasker(config.resolvedEnvValues);
   try {
     const inDoubt = (await store.list({ state: 'IN_DOUBT' })).length;
     const servers: DoctorServerReport[] = [];
@@ -563,7 +575,15 @@ async function commandDoctor(
           warnings: decision.guarded && !hasKeyFields ? freeTextWarning(tool) : [],
         };
       });
-      servers.push({ name: connection.name, status: 'connected', tools });
+      servers.push({
+        name: connection.name,
+        status: 'connected',
+        tools,
+        surfaceFailures: connection.surfaceFailures.map((failure) => ({
+          surface: failure.surface,
+          message: maskSecrets(failure.message),
+        })),
+      });
     }
     for (const failure of downstreams.failures) {
       servers.push({ ...failure, status: 'failed' });

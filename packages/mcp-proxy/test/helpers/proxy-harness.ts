@@ -44,6 +44,7 @@ export async function connectInProcess(
     resources,
     resourceTemplates,
     prompts,
+    surfaceFailures: [],
     status: 'connected',
     failure: null,
     callTool: (params, options) => client.callTool(params, options),

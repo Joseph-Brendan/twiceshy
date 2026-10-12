@@ -26,6 +26,34 @@ import { RestartScheduler } from './restart.js';
 
 export type ConnectionStatus = 'connected' | 'restarting' | 'failed' | 'closed';
 
+/** A surface whose listing failed, kept so status and doctor can show it (C20.10). */
+export interface SurfaceFailure {
+  surface: 'resources' | 'resource templates' | 'prompts';
+  message: string;
+}
+
+/** Replaces any recorded failure for `surface` (C20 rule 10). */
+export function recordSurfaceFailure(
+  connection: DownstreamConnection,
+  surface: SurfaceFailure['surface'],
+  message: string,
+): void {
+  connection.surfaceFailures = [
+    ...connection.surfaceFailures.filter((failure) => failure.surface !== surface),
+    { surface, message },
+  ];
+}
+
+/** Clears a recorded surface failure after a successful listing. */
+export function clearSurfaceFailure(
+  connection: DownstreamConnection,
+  surface: SurfaceFailure['surface'],
+): void {
+  connection.surfaceFailures = connection.surfaceFailures.filter(
+    (failure) => failure.surface !== surface,
+  );
+}
+
 export interface DownstreamConnection {
   readonly name: string;
   /** Replaced when the server restarts; always use `callTool` for calls. */
@@ -34,6 +62,8 @@ export interface DownstreamConnection {
   resources: Resource[];
   resourceTemplates: ResourceTemplateType[];
   prompts: Prompt[];
+  /** Surfaces whose last listing failed; status and doctor display these. */
+  surfaceFailures: SurfaceFailure[];
   status: ConnectionStatus;
   failure: DownstreamFailure | null;
   callTool(
@@ -341,20 +371,6 @@ export async function listAllTools(client: Client, timeoutMs: number): Promise<T
   }
 }
 
-/** Lists one surface, treating "this server does not offer it" as empty. */
-async function listSurface<T>(
-  label: string,
-  load: () => Promise<T[]>,
-  logger: Logger,
-): Promise<T[]> {
-  try {
-    return await load();
-  } catch (cause) {
-    logger.debug(`${label} are not available: ${describeError(cause)}`);
-    return [];
-  }
-}
-
 class ManagedConnection implements DownstreamConnection {
   readonly name: string;
   client!: Client;
@@ -362,6 +378,7 @@ class ManagedConnection implements DownstreamConnection {
   resources: Resource[] = [];
   resourceTemplates: ResourceTemplateType[] = [];
   prompts: Prompt[] = [];
+  surfaceFailures: SurfaceFailure[] = [];
   status: ConnectionStatus = 'restarting';
   failure: DownstreamFailure | null = null;
 
@@ -468,33 +485,52 @@ class ManagedConnection implements DownstreamConnection {
 
   private async reloadSurfaces(): Promise<void> {
     const timeout = this.options.listingTimeoutMs ?? 15_000;
-    const logger = this.options.logger.child(this.name);
     const capabilities = this.client.getServerCapabilities();
     this.tools = capabilities?.tools === undefined ? [] : await listAllTools(this.client, timeout);
-    this.resources =
-      capabilities?.resources === undefined
-        ? []
-        : await listSurface(
-            'resources',
-            async () => (await this.client.listResources()).resources,
-            logger,
-          );
-    this.resourceTemplates =
-      capabilities?.resources === undefined
-        ? []
-        : await listSurface(
-            'resource templates',
-            async () => (await this.client.listResourceTemplates()).resourceTemplates,
-            logger,
-          );
-    this.prompts =
-      capabilities?.prompts === undefined
-        ? []
-        : await listSurface(
-            'prompts',
-            async () => (await this.client.listPrompts()).prompts,
-            logger,
-          );
+    const supportsResources = capabilities?.resources !== undefined;
+    const supportsPrompts = capabilities?.prompts !== undefined;
+    this.resources = supportsResources
+      ? await this.loadSurface(
+          'resources',
+          async () => (await this.client.listResources()).resources,
+        )
+      : [];
+    this.resourceTemplates = supportsResources
+      ? await this.loadSurface(
+          'resource templates',
+          async () => (await this.client.listResourceTemplates()).resourceTemplates,
+        )
+      : [];
+    this.prompts = supportsPrompts
+      ? await this.loadSurface('prompts', async () => (await this.client.listPrompts()).prompts)
+      : [];
+    if (!supportsResources) {
+      clearSurfaceFailure(this, 'resources');
+      clearSurfaceFailure(this, 'resource templates');
+    }
+    if (!supportsPrompts) {
+      clearSurfaceFailure(this, 'prompts');
+    }
+  }
+
+  /**
+   * C20 rule 10: a listing failure is logged at warn and recorded, so status
+   * and doctor show it instead of the surface looking empty.
+   */
+  private async loadSurface<T>(
+    surface: SurfaceFailure['surface'],
+    load: () => Promise<T[]>,
+  ): Promise<T[]> {
+    try {
+      const items = await load();
+      clearSurfaceFailure(this, surface);
+      return items;
+    } catch (cause) {
+      const logger = this.options.logger.child(this.name);
+      logger.warn(`could not list ${surface}: ${describeErrorForLevel(logger, cause)}`);
+      recordSurfaceFailure(this, surface, describeError(cause));
+      return [];
+    }
   }
 
   private handleTransportClose(): void {

@@ -1,14 +1,17 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import type { Client } from '@modelcontextprotocol/client';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runCli } from '../src/cli.js';
 import type { ProxyHandle } from '../src/index.js';
-import { connectAllDownstreams, createProxy, loadConfig } from '../src/index.js';
+import { connectAllDownstreams, createLogger, createProxy, loadConfig } from '../src/index.js';
 import { createInteractiveServer } from './fixtures/interactive-server.mjs';
 import { createProgressServer } from './fixtures/progress-server.mjs';
 import { createSurfacesServer } from './fixtures/surfaces-server.mjs';
+import { REPO_ROOT } from './helpers/built-binary.js';
 import {
   connectToProxy,
   silentLogger,
@@ -19,6 +22,9 @@ import {
 
 const CRASHY_FIXTURE = fileURLToPath(new URL('./fixtures/crashy-server.mjs', import.meta.url));
 const SURFACES_FIXTURE = fileURLToPath(new URL('./fixtures/surfaces-server.mjs', import.meta.url));
+const BROKEN_SURFACES_FIXTURE = fileURLToPath(
+  new URL('./fixtures/broken-surfaces-server.mjs', import.meta.url),
+);
 
 const tempDirs = new Set<string>();
 const proxies = new Set<ProxyHandle>();
@@ -144,6 +150,67 @@ describe('proxy resilience', () => {
 
     const status = await client.callTool({ name: 'twiceshy_status', arguments: {} });
     expect(textOf(status.content[0])).toContain('crashy: FAILED');
+  });
+
+  it('C20.10: a failed resource or prompt listing is logged at warn and shown in status and doctor', async () => {
+    const writes: string[] = [];
+    const logger = createLogger({
+      level: 'warn',
+      stream: new Writable({
+        write(chunk, _encoding, callback) {
+          writes.push(String(chunk));
+          callback();
+        },
+      }),
+    });
+    const config = loadConfig({
+      store: { type: 'memory' },
+      mcpServers: {
+        broken: { command: process.execPath, args: [BROKEN_SURFACES_FIXTURE] },
+      },
+    });
+    const proxy = await createProxy({ config, logger });
+    proxies.add(proxy);
+    const client = await connectToProxy(proxy);
+    clients.add(client);
+
+    const connection = proxy.connections[0];
+    expect(connection?.surfaceFailures.map((failure) => failure.surface).sort()).toEqual([
+      'prompts',
+      'resource templates',
+      'resources',
+    ]);
+    expect(writes.join('')).toContain('could not list resources');
+    expect(writes.join('')).toContain('could not list prompts');
+
+    const status = await client.callTool({ name: 'twiceshy_status', arguments: {} });
+    const statusText = textOf(status.content[0]);
+    expect(statusText).toContain('could not list resources');
+    expect(statusText).toContain('could not list prompts');
+
+    const configFile = join(tempDir(), 'config.json');
+    writeFileSync(
+      configFile,
+      JSON.stringify({
+        store: { type: 'memory' },
+        mcpServers: {
+          broken: { command: process.execPath, args: [BROKEN_SURFACES_FIXTURE] },
+        },
+      }),
+    );
+    let doctorOut = '';
+    const code = await runCli(['doctor', '--config', configFile], {
+      io: {
+        out: (text) => {
+          doctorOut += text;
+        },
+        err: () => undefined,
+      },
+      cwd: REPO_ROOT,
+    });
+    expect(code).toBe(0);
+    expect(doctorOut).toContain('could not list resources');
+    expect(doctorOut).toContain('could not list prompts');
   });
 
   it('P7: progress notifications and cancellation pass through correctly', async () => {

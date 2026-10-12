@@ -215,7 +215,8 @@ function openDatabase(Database: typeof BetterSqlite3, path: string): SqliteDatab
       try {
         db.close();
       } catch {
-        // Best effort: the open error below is the one the caller needs.
+        // last resort: the open error below is the one the caller needs, and
+        // there is nowhere left to report this cleanup failure.
       }
     }
     throw openError(path, cause);

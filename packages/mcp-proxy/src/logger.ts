@@ -110,7 +110,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
       }
       stream.write(`${JSON.stringify(line)}\n`);
     } catch {
-      // The stream is closed; there is nowhere left to report this.
+      // last resort: the stream is closed; there is nowhere left to report this.
     }
   };
 

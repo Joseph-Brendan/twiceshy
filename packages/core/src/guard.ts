@@ -1200,7 +1200,7 @@ class DefaultGuard implements Guard {
     try {
       process.stderr.write(`[twiceshy] ${message}\n`);
     } catch {
-      // Best effort: a broken stderr must never break a guarded call.
+      // last resort: a broken stderr must never break a guarded call.
     }
   }
 }

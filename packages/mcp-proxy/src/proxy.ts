@@ -34,7 +34,12 @@ import {
 import { SqliteStore } from 'twiceshy/sqlite';
 import type { ProxyConfig, ToolOptions } from './config.js';
 import type { DownstreamConnection, DownstreamFailure, Downstreams } from './downstream.js';
-import { connectAllDownstreams, listAllTools } from './downstream.js';
+import {
+  clearSurfaceFailure,
+  connectAllDownstreams,
+  listAllTools,
+  recordSurfaceFailure,
+} from './downstream.js';
 import { createLogger, type Logger, redirectConsoleToStderr } from './logger.js';
 import { createSecretMasker } from './mask.js';
 import { buildToolRouting, exposeName, type ToolNaming, type ToolRouting } from './naming.js';
@@ -394,6 +399,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     throw cause;
   }
 
+  const maskSecrets = createSecretMasker(options.config.resolvedEnvValues);
   const store = createActionStore(options.config.store, logger);
   const guards = new Map<string, Guard>();
   for (const connection of downstreams.connections) {
@@ -528,9 +534,16 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
             `  ${connection.name}: ${connection.status}, ${connection.tools.length} tools (${guardedCount(connection)} guarded)`,
           );
         }
+        for (const connection of downstreams.connections) {
+          for (const failure of connection.surfaceFailures) {
+            lines.push(
+              `  ${connection.name}: could not list ${failure.surface}: ${maskSecrets(failure.message)}`,
+            );
+          }
+        }
         for (const failure of downstreams.failures) {
           lines.push(
-            `  ${failure.name}: FAILED — ${failure.what} Why: ${failure.why} Fix: ${failure.fix}`,
+            `  ${failure.name}: FAILED — ${maskSecrets(failure.what)} Why: ${maskSecrets(failure.why)} Fix: ${maskSecrets(failure.fix)}`,
           );
         }
         const inDoubt = await store.list({ state: 'IN_DOUBT' });
@@ -761,30 +774,50 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
   };
 
   const refreshResources = async (connection: DownstreamConnection): Promise<void> => {
+    const child = logger.child(connection.name);
+    if (connection.client.getServerCapabilities()?.resources === undefined) {
+      connection.resources = [];
+      connection.resourceTemplates = [];
+      clearSurfaceFailure(connection, 'resources');
+      clearSurfaceFailure(connection, 'resource templates');
+      rebuildRouting();
+      await server.sendResourceListChanged();
+      return;
+    }
     try {
-      connection.resources =
-        connection.client.getServerCapabilities()?.resources === undefined
-          ? []
-          : await listSurfaceResources(connection);
+      connection.resources = (await connection.client.listResources()).resources;
+      connection.resourceTemplates = (
+        await connection.client.listResourceTemplates()
+      ).resourceTemplates;
+      clearSurfaceFailure(connection, 'resources');
+      clearSurfaceFailure(connection, 'resource templates');
       rebuildRouting();
       await server.sendResourceListChanged();
     } catch (cause) {
-      const child = logger.child(connection.name);
-      child.error(`could not refresh resources: ${safeErrorText(child, cause)}`);
+      // C20 rule 10: keep the previous list and record why it failed.
+      child.warn(`could not list resources: ${safeErrorText(child, cause)}`);
+      recordSurfaceFailure(connection, 'resources', describeError(cause));
     }
   };
 
   const refreshPrompts = async (connection: DownstreamConnection): Promise<void> => {
+    const child = logger.child(connection.name);
+    if (connection.client.getServerCapabilities()?.prompts === undefined) {
+      connection.prompts = [];
+      clearSurfaceFailure(connection, 'prompts');
+      rebuildRouting();
+      await server.sendPromptListChanged();
+      return;
+    }
     try {
-      connection.prompts =
-        connection.client.getServerCapabilities()?.prompts === undefined
-          ? []
-          : await listSurfacePrompts(connection);
+      connection.prompts = (await connection.client.listPrompts()).prompts;
+      clearSurfaceFailure(connection, 'prompts');
       rebuildRouting();
       await server.sendPromptListChanged();
     } catch (cause) {
-      const child = logger.child(connection.name);
-      child.error(`could not refresh prompts: ${safeErrorText(child, cause)}`);
+      // C20 rule 10: keep the previous list and record why it failed.
+      child.warn(`could not list prompts: ${safeErrorText(child, cause)}`);
+      recordSurfaceFailure(connection, 'prompts', describeError(cause));
     }
   };
 
@@ -830,7 +863,13 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     close: async () => {
       closing = true;
       await waitForActiveCalls(activeCalls, SHUTDOWN_LIMIT_MS);
-      await Promise.all([...guards.values()].map((guard) => guard.close().catch(() => undefined)));
+      await Promise.all(
+        [...guards.values()].map((guard) =>
+          guard.close().catch((cause: unknown) => {
+            logger.warn(`closing the guard failed: ${safeErrorText(logger, cause)}`);
+          }),
+        ),
+      );
       await downstreams.close();
       await store.close();
       try {
@@ -840,24 +879,6 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       }
     },
   };
-}
-
-/** Re-reads a connection's resources, treating an absent surface as empty. */
-async function listSurfaceResources(connection: DownstreamConnection): Promise<Resource[]> {
-  try {
-    return (await connection.client.listResources()).resources;
-  } catch {
-    return [];
-  }
-}
-
-/** Re-reads a connection's prompts, treating an absent surface as empty. */
-async function listSurfacePrompts(connection: DownstreamConnection): Promise<Prompt[]> {
-  try {
-    return (await connection.client.listPrompts()).prompts;
-  } catch {
-    return [];
-  }
 }
 
 /**
