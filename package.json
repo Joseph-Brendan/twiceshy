@@ -5,7 +5,7 @@
   "description": "Twiceshy: Repeat-Action Guard for AI agents",
   "type": "module",
   "scripts": {
-    "typecheck": "pnpm -r --filter='./packages/*' exec tsc --noEmit",
+    "typecheck": "pnpm -r --filter=\"./packages/*\" exec tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
@@ -14,8 +14,8 @@
     "test:stress": "pnpm build && vitest run --config vitest.stress.config.ts",
     "test:mutation": "stryker run",
     "test:pack": "node scripts/test-pack.mjs",
-    "build": "pnpm -r --filter='./packages/*' run build",
-    "check:package": "pnpm -r --filter='./packages/*' run check:package"
+    "build": "pnpm -r --filter=\"./packages/*\" run build",
+    "check:package": "pnpm -r --filter=\"./packages/*\" run check:package"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",

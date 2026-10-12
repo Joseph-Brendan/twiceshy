@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,10 +78,18 @@ export function ensureBuilt(): void {
   try {
     // Re-check under the lock: another worker may have just finished.
     if (!distIsFresh()) {
-      const output = execSync('pnpm build', { cwd: REPO_ROOT, stdio: 'pipe' }).toString();
+      const result = spawnSync('pnpm', ['build'], {
+        cwd: REPO_ROOT,
+        shell: true,
+        encoding: 'utf8',
+      });
+      const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.slice(-4000);
+      if (result.status !== 0) {
+        throw new Error(`pnpm build failed with status ${String(result.status)}: ${output}`);
+      }
       if (!existsSync(CLI_PATH) || !existsSync(CORE_DIST)) {
         throw new Error(
-          `the build finished without producing both dist bundles. Output: ${output.slice(-2000)}`,
+          `the build finished without producing both dist bundles. cwd=${REPO_ROOT} process.cwd=${process.cwd()} cli=${existsSync(CLI_PATH)} core=${existsSync(CORE_DIST)} output: ${output}`,
         );
       }
     }
