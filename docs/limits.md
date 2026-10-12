@@ -10,9 +10,9 @@ These are the honest limits of Twiceshy v1. Each one is a deliberate choice, not
 
 `MemoryStore` keeps records in memory only. When the process stops, every record is gone. A retry after a restart looks like a brand new action. Use `SqliteStore` for anything that matters.
 
-## Node 22.14 or newer for SQLite
+## Node 22 or newer
 
-`SqliteStore` uses `better-sqlite3`, which ships prebuilt native binaries. Those binaries need a newer Node API. Node 22.13 and older crash when they load the binary. Use Node 22.14 or newer, or Node 24. The in-memory store works on older Node 22 releases.
+Twiceshy supports Node 22 and Node 24. `SqliteStore` uses `better-sqlite3` 12.x, which ships prebuilt native binaries for every Node 22 and Node 24 release, so no compiler is needed. Older Node lines are not supported.
 
 ## Annotations are hints
 

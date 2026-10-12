@@ -2,18 +2,11 @@ packages:
   - 'packages/*'
   - 'examples/*'
 
-# better-sqlite3 ships prebuilt binaries for every supported platform, so its
-# build script must stay off: pnpm 10 sees binding.gyp in the tarball and would
-# run node-gyp, which needs a C++ toolchain (MSVC on Windows). Real users have
-# no compiler, so the prebuilt binary must be used instead.
-ignoredBuiltDependencies:
-  - better-sqlite3
-
+# better-sqlite3 12.x runs prebuild-install, which downloads a prebuilt binary
+# for the current platform and Node release and only falls back to node-gyp
+# when no prebuild exists. Allowing the script keeps the prebuilt path working
+# on every supported Node 22 and Node 24 release, including 22.13.
 # esbuild's postinstall only places its prebuilt binary; no compiler needed.
 onlyBuiltDependencies:
+  - better-sqlite3
   - esbuild
-
-# better-sqlite3 13 ships prebuilt binaries that require Node-API 10, which
-# Node 22 supports only from v22.14.0. Running project scripts on Node 24.10.0
-# keeps "pnpm test" working on older Node 22 patch releases, such as v22.13.0.
-useNodeVersion: 24.10.0

@@ -410,6 +410,7 @@ export class SqliteStore implements ActionStore {
   }
 
   async begin(input: BeginInput): Promise<BeginResult> {
+    this.assertOpen();
     return this.wrap('begin', () => {
       const tx = this.db.transaction((): BeginResult => {
         const identity = input.explicitKey ?? input.fingerprint;
@@ -544,6 +545,7 @@ export class SqliteStore implements ActionStore {
   }
 
   async renewLease(id: string, until: Date): Promise<void> {
+    this.assertOpen();
     return this.wrap('renewLease', () => {
       const info = this.statement(
         "UPDATE actions SET lease_expires_at = @until WHERE id = @id AND state = 'IN_FLIGHT'",
@@ -555,6 +557,7 @@ export class SqliteStore implements ActionStore {
   }
 
   async complete(id: string, input: CompleteInput): Promise<CompleteResult> {
+    this.assertOpen();
     return this.wrap('complete', () => {
       const tx = this.db.transaction((): CompleteResult => {
         // The read, the conditional check, and the write run inside one
@@ -635,6 +638,7 @@ export class SqliteStore implements ActionStore {
   }
 
   async get(id: string): Promise<ActionRecord | null> {
+    this.assertOpen();
     return this.wrap('get', () => {
       const row = this.findRowById(id);
       return row === undefined ? null : rowToRecord(row);
@@ -642,6 +646,7 @@ export class SqliteStore implements ActionStore {
   }
 
   async findByIdentity(identity: string): Promise<ActionRecord | null> {
+    this.assertOpen();
     return this.wrap('findByIdentity', () => {
       const row = this.findCurrentRow('identity', identity);
       return row === undefined ? null : rowToRecord(row);
@@ -649,6 +654,7 @@ export class SqliteStore implements ActionStore {
   }
 
   async list(filter: ListFilter): Promise<ActionRecord[]> {
+    this.assertOpen();
     return this.wrap('list', () => {
       const conditions: string[] = [];
       const params: Record<string, unknown> = {};
@@ -696,6 +702,7 @@ export class SqliteStore implements ActionStore {
   }
 
   async resolve(id: string, resolution: Resolution): Promise<void> {
+    this.assertOpen();
     return this.wrap('resolve', () => {
       const info = this.statement(
         `UPDATE actions SET
@@ -721,6 +728,7 @@ export class SqliteStore implements ActionStore {
   }
 
   async grantRepeat(fingerprint: string, grant: RepeatGrant): Promise<void> {
+    this.assertOpen();
     return this.wrap('grantRepeat', () => {
       const row = this.findCurrentRow('fingerprint', fingerprint);
       if (row === undefined) {
@@ -738,6 +746,7 @@ export class SqliteStore implements ActionStore {
   }
 
   async purge(olderThan: Date): Promise<number> {
+    this.assertOpen();
     return this.wrap('purge', () => {
       const info = this.statement(
         `DELETE FROM actions
@@ -752,9 +761,23 @@ export class SqliteStore implements ActionStore {
     if (this.closed) {
       return;
     }
+    // Mark closed before touching the handle so no later call can start a new
+    // statement. Dropping the cache releases every prepared statement, and
+    // db.close() finalizes them and the underlying file handle.
     this.closed = true;
     this.statements.clear();
     this.db.close();
+  }
+
+  /** Every call after close() fails cleanly instead of touching a closed handle. */
+  private assertOpen(): void {
+    if (this.closed) {
+      throw new StoreUnavailableError({
+        what: 'The SQLite store has been closed.',
+        why: 'A store call was made after close().',
+        fix: 'Create a new SqliteStore before using the store again.',
+      });
+    }
   }
 
   private findRowById(id: string): ActionRow | undefined {

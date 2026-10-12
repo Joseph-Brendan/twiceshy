@@ -575,6 +575,11 @@ class DefaultGuard implements Guard {
   private readonly options: NormalizedGuardOptions;
   private readonly activeRenewals = new Set<() => void>();
   private readonly activeCalls = new Set<Promise<unknown>>();
+  /** Renewals and purges that are in flight; close() waits for them or times out. */
+  private readonly pendingCleanup = new Set<Promise<unknown>>();
+  /** Late-completion watchers; close() cancels them so nothing writes after close. */
+  private readonly lateWatchers = new Set<{ cancel: () => void }>();
+  private closePromise: Promise<void> | null = null;
   private closed = false;
   private lastPurgeAt: number | null = null;
 
@@ -662,19 +667,38 @@ class DefaultGuard implements Guard {
     return this.options.store.purge(cutoff);
   }
 
-  async close(): Promise<void> {
-    if (this.closed) {
-      return;
-    }
+  /**
+   * Safe at any moment. It stops every timer, cancels late-completion
+   * watchers, waits for in-flight calls and pending cleanup (bounded by
+   * closeTimeoutMs), and only then closes the store. Calling close() again
+   * returns the same promise.
+   */
+  close(): Promise<void> {
+    this.closePromise ??= this.doClose();
+    return this.closePromise;
+  }
+
+  private async doClose(): Promise<void> {
     this.closed = true;
     for (const stop of [...this.activeRenewals]) {
       stop();
     }
     this.activeRenewals.clear();
+    for (const watcher of [...this.lateWatchers]) {
+      watcher.cancel();
+    }
     await this.waitForActiveCalls();
+    await this.waitForPendingCleanup();
     if (this.options.closeStore) {
       await this.options.store.close();
     }
+  }
+
+  private trackCleanup(promise: Promise<unknown>): void {
+    this.pendingCleanup.add(promise);
+    void promise.finally(() => {
+      this.pendingCleanup.delete(promise);
+    });
   }
 
   private async runClaim<T>(
@@ -953,8 +977,21 @@ class DefaultGuard implements Guard {
     settled: Promise<Settled<T>>,
     context: ExecuteContext,
   ): void {
+    if (this.closed) {
+      return;
+    }
+    let cancelled = false;
+    const watcher = {
+      cancel: () => {
+        cancelled = true;
+      },
+    };
+    this.lateWatchers.add(watcher);
     void settled
       .then(async (outcome) => {
+        if (cancelled || this.closed) {
+          return;
+        }
         // The store decides among late-completion, human-resolution, and
         // "nothing to do", atomically and against the current record (C20).
         const completion = await this.completeSettled(recordId, outcome, context);
@@ -984,7 +1021,12 @@ class DefaultGuard implements Guard {
         }
       })
       .catch((error: unknown) => {
-        this.writeStderr(`late completion failed: ${describeError(error)}`);
+        if (!this.closed) {
+          this.writeStderr(`late completion failed: ${describeError(error)}`);
+        }
+      })
+      .finally(() => {
+        this.lateWatchers.delete(watcher);
       });
   }
 
@@ -1085,11 +1127,14 @@ class DefaultGuard implements Guard {
       if (stopped) {
         return;
       }
-      void this.options.store
+      const renewal = this.options.store
         .renewLease(recordId, new Date(this.options.clock.now().getTime() + leaseMs))
         .catch((error: unknown) => {
-          this.writeStderr(`lease renewal failed: ${describeError(error)}`);
+          if (!this.closed) {
+            this.writeStderr(`lease renewal failed: ${describeError(error)}`);
+          }
         });
+      this.trackCleanup(renewal);
       handle = this.options.clock.setTimeout(tick, interval);
     };
     handle = this.options.clock.setTimeout(tick, interval);
@@ -1109,15 +1154,24 @@ class DefaultGuard implements Guard {
 
   /** C12: purge at most once an hour, never on the critical path. */
   private maybePurge(context: EventContext): void {
+    if (this.closed) {
+      return;
+    }
     const now = this.options.clock.now().getTime();
     if (this.lastPurgeAt !== null && now - this.lastPurgeAt < PURGE_INTERVAL_MS) {
       return;
     }
     this.lastPurgeAt = now;
     const cutoff = new Date(now - this.options.retentionMs);
-    void this.options.store.purge(cutoff).catch((error: unknown) => {
-      this.emit('warning', context, { reason: 'automatic purge failed', error });
-    });
+    const purge = this.options.store
+      .purge(cutoff)
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        if (!this.closed) {
+          this.emit('warning', context, { reason: 'automatic purge failed', error });
+        }
+      });
+    this.trackCleanup(purge);
   }
 
   private async waitForRecord(recordId: string, waitMs: number): Promise<ActionRecord | null> {
@@ -1139,6 +1193,26 @@ class DefaultGuard implements Guard {
     return new Promise((resolve) => {
       this.options.clock.setTimeout(resolve, ms);
     });
+  }
+
+  private async waitForPendingCleanup(): Promise<void> {
+    if (this.pendingCleanup.size === 0) {
+      return;
+    }
+    let handle: TimerHandle | undefined;
+    const limit = new Promise<void>((resolve) => {
+      handle = this.options.clock.setTimeout(resolve, this.options.closeTimeoutMs);
+    });
+    try {
+      await Promise.race([
+        Promise.allSettled([...this.pendingCleanup]).then(() => undefined),
+        limit,
+      ]);
+    } finally {
+      if (handle !== undefined) {
+        this.options.clock.clearTimeout(handle);
+      }
+    }
   }
 
   private async waitForActiveCalls(): Promise<void> {

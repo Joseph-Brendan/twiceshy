@@ -67,7 +67,7 @@ describe('packaging manifests (K1/K3)', () => {
 
   it('K3: core depends on zod only, with better-sqlite3 as an optional peer', () => {
     expect(Object.keys(core.dependencies ?? {}).sort()).toEqual(['zod']);
-    expect(core.peerDependencies?.['better-sqlite3']).toMatch(/^\^13\./);
+    expect(core.peerDependencies?.['better-sqlite3']).toMatch(/^\^12\./);
     expect(core.peerDependenciesMeta?.['better-sqlite3']?.optional).toBe(true);
   });
 

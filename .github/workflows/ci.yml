@@ -37,27 +37,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Resolve exact Node.js version
-        id: node-version
-        shell: bash
-        run: echo "exact=$(node -p 'process.version.slice(1)')" >> "$GITHUB_OUTPUT"
-
       - name: Typecheck
-        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} typecheck
+        run: pnpm typecheck
 
       - name: Lint
-        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} lint
+        run: pnpm lint
 
       # Build before Test so the real-binary tests (P9/P11) never race two
       # parallel test workers against one dist folder.
       - name: Build
-        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} build
+        run: pnpm build
 
       - name: Test
-        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} test
+        run: pnpm test
 
       - name: Check package
-        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} check:package
+        run: pnpm check:package
 
       - name: Pack and install test
-        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} test:pack
+        run: pnpm test:pack

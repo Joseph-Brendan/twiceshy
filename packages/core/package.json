@@ -62,7 +62,7 @@
     }
   },
   "engines": {
-    "node": ">=22.14.0"
+    "node": ">=22"
   },
   "sideEffects": false,
   "scripts": {
@@ -74,7 +74,7 @@
     "zod": "^4.6.5"
   },
   "peerDependencies": {
-    "better-sqlite3": "^13.0.0",
+    "better-sqlite3": "^12.11.1",
     "vitest": ">=4"
   },
   "peerDependenciesMeta": {
@@ -88,7 +88,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.13.0",
-    "better-sqlite3": "^13.0.3",
+    "better-sqlite3": "^12.11.1",
     "fast-check": "^4.10.2",
     "tsup": "^8.5.1",
     "typescript": "~5.9.3"

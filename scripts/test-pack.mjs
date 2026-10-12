@@ -77,7 +77,7 @@ try {
   process.stdout.write('[test:pack] installing tarballs and better-sqlite3 into a fresh project\n');
   // npm is the real-world installer here: pnpm would try to fetch the packed
   // proxy's rewritten "twiceshy": "0.1.0" dependency from the registry.
-  run('npm', ['install', coreTarball, proxyTarball, 'better-sqlite3@13.0.3'], project);
+  run('npm', ['install', coreTarball, proxyTarball, 'better-sqlite3@^12.11.1'], project);
 
   // K2: ESM import and one guarded call.
   writeFileSync(

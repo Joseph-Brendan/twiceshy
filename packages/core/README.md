@@ -73,7 +73,7 @@ Outcome: executed.
 Value: {"receipt":"PS-T1"}.
 ```
 
-`SqliteStore` needs Node 22.14 or newer, because `better-sqlite3` ships prebuilt binaries that use a newer Node API. See [Limits](../../docs/limits.md).
+`SqliteStore` needs Node 22 or newer. `better-sqlite3` 12.x ships prebuilt binaries for every Node 22 and Node 24 release. See [Limits](../../docs/limits.md).
 
 ## Concepts
 
@@ -164,7 +164,7 @@ Hooks receive one structured event per decision: `onExecute`, `onDuplicate`, `on
 - `SqliteStore` protects one machine only. Agents on several servers need the future Redis or Postgres store.
 - A wrong `keyFields` choice is the main way protection fails. Read [Choosing keyFields](../../docs/choosing-key-fields.md).
 - Twiceshy blocks legitimate repeats inside the window. A person can approve one with `allowRepeat`.
-- `better-sqlite3` prebuilds need Node 22.14 or newer.
+- Twiceshy needs Node 22 or newer.
 
 The full list is in [Limits](../../docs/limits.md).
 

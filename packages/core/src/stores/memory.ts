@@ -29,13 +29,26 @@ export class MemoryStore implements ActionStore {
   private readonly records = new Map<string, ActionRecord>();
   private sequence = 0;
   private tokenSequence = 0;
+  private closed = false;
 
   private nextToken(): string {
     this.tokenSequence += 1;
     return `claim-${this.tokenSequence}`;
   }
 
+  /** Every call after close() fails cleanly instead of touching dead state. */
+  private assertOpen(): void {
+    if (this.closed) {
+      throw new StoreUnavailableError({
+        what: 'The memory store has been closed.',
+        why: 'A store call was made after close().',
+        fix: 'Create a new MemoryStore before using the store again.',
+      });
+    }
+  }
+
   async begin(input: BeginInput): Promise<BeginResult> {
+    this.assertOpen();
     // Atomicity rule (C12): everything from the read on the next line to the
     // record write at the end of this method runs synchronously, with no
     // `await` in between. On a single JavaScript thread nothing can interleave
@@ -128,6 +141,7 @@ export class MemoryStore implements ActionStore {
   }
 
   async renewLease(id: string, until: Date): Promise<void> {
+    this.assertOpen();
     const record = this.records.get(id);
     if (record === undefined) {
       throw recordNotFound(id);
@@ -139,6 +153,7 @@ export class MemoryStore implements ActionStore {
   }
 
   async complete(id: string, input: CompleteInput): Promise<CompleteResult> {
+    this.assertOpen();
     // Everything from here to the record write runs synchronously, so the
     // conditional check and the write are one atomic operation (C12/C20).
     const record = this.records.get(id);
@@ -175,16 +190,19 @@ export class MemoryStore implements ActionStore {
   }
 
   async get(id: string): Promise<ActionRecord | null> {
+    this.assertOpen();
     const record = this.records.get(id);
     return record === undefined ? null : clone(record);
   }
 
   async findByIdentity(identity: string): Promise<ActionRecord | null> {
+    this.assertOpen();
     const record = this.findCurrent((candidate) => candidate.identity === identity);
     return record === null ? null : clone(record);
   }
 
   async list(filter: ListFilter): Promise<ActionRecord[]> {
+    this.assertOpen();
     const states =
       filter.state === undefined
         ? null
@@ -209,6 +227,7 @@ export class MemoryStore implements ActionStore {
   }
 
   async resolve(id: string, resolution: Resolution): Promise<void> {
+    this.assertOpen();
     const record = this.records.get(id);
     if (record === undefined) {
       throw recordNotFound(id);
@@ -226,6 +245,7 @@ export class MemoryStore implements ActionStore {
   }
 
   async grantRepeat(fingerprint: string, grant: RepeatGrant): Promise<void> {
+    this.assertOpen();
     const record = this.findCurrent((candidate) => candidate.fingerprint === fingerprint);
     if (record === null) {
       throw new StoreUnavailableError({
@@ -238,6 +258,7 @@ export class MemoryStore implements ActionStore {
   }
 
   async purge(olderThan: Date): Promise<number> {
+    this.assertOpen();
     const cutoff = olderThan.getTime();
     let removed = 0;
     for (const [id, record] of this.records) {
@@ -256,7 +277,11 @@ export class MemoryStore implements ActionStore {
   }
 
   async close(): Promise<void> {
-    // Memory-only storage holds nothing outside the Maps; nothing to release.
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    this.records.clear();
   }
 
   private findCurrent(matches: (record: ActionRecord) => boolean): ActionRecord | null {
