@@ -280,6 +280,9 @@ describe('L1: commands, help, JSON, and exit codes', () => {
     });
     expect(showText.text()).toContain('state:       IN_DOUBT');
     expect(showText.text()).toContain('completed:   -');
+    // C20 rule 8: the safe error summary is shown, never the raw message.
+    expect(showText.text()).toContain('error:       Error [none/ambiguous]: ambiguous error');
+    expect(showText.text()).not.toContain('socket hang up');
 
     const resolveText = capture();
     expect(

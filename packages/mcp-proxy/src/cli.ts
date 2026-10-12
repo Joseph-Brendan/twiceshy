@@ -12,6 +12,7 @@ import { loadConfigFile } from './config.js';
 import { connectAllDownstreams } from './downstream.js';
 import type { Logger, LogLevel } from './logger.js';
 import { createLogger, isLogLevel, nullLogStream } from './logger.js';
+import { createSecretMasker } from './mask.js';
 import { createActionStore, guardAnnotations, startProxy } from './proxy.js';
 import { PROXY_VERSION } from './version.js';
 
@@ -536,7 +537,10 @@ async function commandDoctor(
   const wantsLogs = (logger.level === 'info' || logger.level === 'debug') && !json;
   const reportLogger = wantsLogs ? logger : createLogger({ level: 'error', stream: nullLogStream });
   const config = configFor(values, deps);
-  const downstreams = await connectAllDownstreams(config.mcpServers, { logger: reportLogger });
+  const downstreams = await connectAllDownstreams(config.mcpServers, {
+    logger: reportLogger,
+    maskSecrets: createSecretMasker(config.resolvedEnvValues),
+  });
   const store = createActionStore(config.store, reportLogger);
   try {
     const inDoubt = (await store.list({ state: 'IN_DOUBT' })).length;

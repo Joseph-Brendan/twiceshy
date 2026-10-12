@@ -81,6 +81,8 @@ export interface ConnectDownstreamOptions {
   restartDelaysMs?: readonly number[];
   /** Called after a successful restart so the proxy can refresh and notify. */
   onRestarted?: (connection: DownstreamConnection) => Promise<void> | void;
+  /** Masks known secret values in printed stderr and failure details (C20). */
+  maskSecrets?: (text: string) => string;
 }
 
 const DEFAULT_CLIENT_INFO: Implementation = { name: 'twiceshy', version: '0.0.0' };
@@ -99,12 +101,25 @@ function describeError(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
+/** C20 rule 5: raw error text is logged only at debug level. */
+function describeErrorForLevel(logger: Logger, cause: unknown): string {
+  return logger.level === 'debug' ? describeError(cause) : errorClassName(cause);
+}
+
+function errorClassName(cause: unknown): string {
+  return cause instanceof Error ? cause.name : typeof cause;
+}
+
 /** Forwards child stderr to the proxy's logger with a server-name prefix. */
-function forwardStderr(stream: Readable, logger: Logger): void {
+function forwardStderr(
+  stream: Readable,
+  logger: Logger,
+  maskSecrets?: (text: string) => string,
+): void {
   let buffer = '';
   const emitLine = (line: string): void => {
     if (line.trim().length > 0) {
-      logger.stderr(line);
+      logger.stderr(maskSecrets === undefined ? line : maskSecrets(line));
     }
   };
   stream.on('data', (chunk: Buffer | string) => {
@@ -194,6 +209,7 @@ export function createDownstreamTransport(
   name: string,
   config: ServerConfig,
   logger: Logger,
+  maskSecrets?: (text: string) => string,
 ): DownstreamTransport {
   if (config.kind === 'stdio') {
     const transport = new DiagnosticStdioTransport({
@@ -205,7 +221,7 @@ export function createDownstreamTransport(
     });
     const stderr = transport.stderr;
     if (stderr !== null) {
-      forwardStderr(stderr as Readable, logger.child(name));
+      forwardStderr(stderr as Readable, logger.child(name), maskSecrets);
     }
     return { transport, diagnostics: transport.diagnostics };
   }
@@ -263,6 +279,22 @@ function startupReason(
     return `timed out after ${Math.round(timeoutMs / 1000)} s`;
   }
   return code === undefined ? message : `${message} (${code})`;
+}
+
+/** C20 rule 7: masks resolved config secrets in a failure's printed fields. */
+function maskFailure(
+  failure: DownstreamFailure,
+  maskSecrets?: (text: string) => string,
+): DownstreamFailure {
+  if (maskSecrets === undefined) {
+    return failure;
+  }
+  return {
+    ...failure,
+    why: maskSecrets(failure.why),
+    target: maskSecrets(failure.target),
+    stderr: failure.stderr.map((line) => maskSecrets(line)),
+  };
 }
 
 /** Builds the doctor-facing startup failure for one server. */
@@ -399,7 +431,9 @@ class ManagedConnection implements DownstreamConnection {
     } catch (cause) {
       this.options.logger
         .child(this.name)
-        .warn(`closing the connection failed: ${describeError(cause)}`);
+        .warn(
+          `closing the connection failed: ${describeErrorForLevel(this.options.logger, cause)}`,
+        );
     }
   }
 
@@ -416,6 +450,7 @@ class ManagedConnection implements DownstreamConnection {
       this.name,
       this.config,
       this.options.logger,
+      this.options.maskSecrets,
     );
     this.diagnostics = diagnostics;
     await client.connect(transport, { timeout: this.options.connectTimeoutMs ?? 15_000 });
@@ -505,22 +540,23 @@ class ManagedConnection implements DownstreamConnection {
       await this.options.onRestarted?.(this);
       return true;
     } catch (cause) {
-      child.warn(`restart attempt failed: ${describeError(cause)}`);
+      child.warn(`restart attempt failed: ${describeErrorForLevel(child, cause)}`);
       return false;
     }
   }
 
   private failureFor(cause: unknown): DownstreamFailure {
-    const { target, targetKind } = serverTarget(this.config);
-    return {
-      name: this.name,
-      what: `The downstream MCP server "${this.name}" is unavailable.`,
-      why: describeError(cause),
-      fix: 'Check the command or URL in the config.',
-      target,
-      targetKind,
-      stderr: [...this.diagnostics.stderr],
-    };
+    return maskFailure(
+      {
+        name: this.name,
+        what: `The downstream MCP server "${this.name}" is unavailable.`,
+        why: describeError(cause),
+        fix: 'Check the command or URL in the config.',
+        ...serverTarget(this.config),
+        stderr: [...this.diagnostics.stderr],
+      },
+      this.options.maskSecrets,
+    );
   }
 }
 
@@ -543,7 +579,7 @@ export async function connectDownstream(
     const connection = await ManagedConnection.start(name, config, options, failures);
     return { ok: true, connection };
   } catch (cause) {
-    const failure =
+    const failure = maskFailure(
       cause instanceof DownstreamStartupError
         ? cause.failure
         : startupFailure(
@@ -552,8 +588,14 @@ export async function connectDownstream(
             cause,
             { exitCode: null, exitSignal: null, stderr: [] },
             options.connectTimeoutMs ?? 15_000,
-          );
-    options.logger.error(`${failure.what} Why: ${failure.why} Fix: ${failure.fix}`);
+          ),
+      options.maskSecrets,
+    );
+    if (options.logger.level === 'debug') {
+      options.logger.error(`${failure.what} Why: ${failure.why} Fix: ${failure.fix}`);
+    } else {
+      options.logger.error(`${failure.what} Fix: ${failure.fix}`);
+    }
     return { ok: false, failure };
   }
 }

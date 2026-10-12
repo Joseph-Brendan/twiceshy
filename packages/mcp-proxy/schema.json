@@ -157,6 +157,9 @@
                     },
                     "treatToolErrorsAsDefinite": {
                       "type": "boolean"
+                    },
+                    "storeResult": {
+                      "type": "boolean"
                     }
                   },
                   "additionalProperties": false
@@ -223,6 +226,9 @@
                       ]
                     },
                     "treatToolErrorsAsDefinite": {
+                      "type": "boolean"
+                    },
+                    "storeResult": {
                       "type": "boolean"
                     }
                   },

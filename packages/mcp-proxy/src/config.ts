@@ -44,6 +44,7 @@ const EXAMPLE_BY_FIELD: Readonly<Record<string, string>> = {
   normalize: '{ "amount": "number" }',
   timeoutMs: '30000',
   treatToolErrorsAsDefinite: 'false',
+  storeResult: 'false',
 };
 
 const durationSchema = z
@@ -82,6 +83,7 @@ const toolConfigSchema = z.strictObject({
     .optional(),
   timeoutMs: durationSchema.optional(),
   treatToolErrorsAsDefinite: z.boolean({ error: 'expected true or false' }).optional(),
+  storeResult: z.boolean({ error: 'expected true or false' }).optional(),
 });
 
 const toolsSchema = z.record(
@@ -144,6 +146,8 @@ export interface ToolOptions {
   normalize?: Readonly<Record<string, NormalizerName>>;
   timeoutMs?: number;
   treatToolErrorsAsDefinite?: boolean;
+  /** False stores no result at all; duplicates then return a short summary (C20). */
+  storeResult?: boolean;
 }
 
 export interface StdioServerConfig {
@@ -175,6 +179,8 @@ export interface ProxyConfig {
   annotateDuplicates: boolean;
   exposeRecentActions: boolean;
   mcpServers: Readonly<Record<string, ServerConfig>>;
+  /** Values resolved from `${VAR}` in the config; masked in diagnostics (C20). */
+  resolvedEnvValues: readonly string[];
 }
 
 export interface LoadConfigOptions {
@@ -252,6 +258,7 @@ function expandEnv(
   path: readonly string[],
   env: Readonly<Record<string, string | undefined>>,
   issues: string[],
+  resolvedValues: Set<string>,
 ): unknown {
   if (typeof value === 'string') {
     return value.replace(ENV_PATTERN, (match, name: string) => {
@@ -266,16 +273,19 @@ function expandEnv(
         }
         return match;
       }
+      resolvedValues.add(resolved);
       return resolved;
     });
   }
   if (Array.isArray(value)) {
-    return value.map((item, index) => expandEnv(item, [...path, String(index)], env, issues));
+    return value.map((item, index) =>
+      expandEnv(item, [...path, String(index)], env, issues, resolvedValues),
+    );
   }
   if (isRecord(value)) {
     const output: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
-      output[key] = expandEnv(item, [...path, key], env, issues);
+      output[key] = expandEnv(item, [...path, key], env, issues, resolvedValues);
     }
     return output;
   }
@@ -296,6 +306,7 @@ function normalizeTools(
       ...(config.treatToolErrorsAsDefinite === undefined
         ? {}
         : { treatToolErrorsAsDefinite: config.treatToolErrorsAsDefinite }),
+      ...(config.storeResult === undefined ? {} : { storeResult: config.storeResult }),
     };
   }
   return tools;
@@ -395,8 +406,9 @@ export function loadConfig(raw: unknown, options: LoadConfigOptions = {}): Proxy
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
   const issues: string[] = [];
+  const resolvedEnvValues = new Set<string>();
 
-  const expanded = expandEnv(raw, [], env, issues);
+  const expanded = expandEnv(raw, [], env, issues, resolvedEnvValues);
   const top = topLevelSchema.safeParse(expanded);
   if (!top.success) {
     pushIssues(issues, top.error.issues, '');
@@ -418,6 +430,7 @@ export function loadConfig(raw: unknown, options: LoadConfigOptions = {}): Proxy
     annotateDuplicates: data.annotateDuplicates ?? true,
     exposeRecentActions: data.exposeRecentActions ?? false,
     mcpServers: servers,
+    resolvedEnvValues: [...resolvedEnvValues],
   };
 }
 

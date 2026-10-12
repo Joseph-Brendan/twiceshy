@@ -154,6 +154,42 @@ describe('doctor startup failures', () => {
   });
 });
 
+describe('C20 rule 7: resolved config secrets are masked in doctor diagnostics', () => {
+  const SECRET = 'sk_live_DOCTORSECRET';
+
+  afterEach(() => {
+    delete process.env.TWICESHY_TEST_SECRET;
+  });
+
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting the documented ${VAR} placeholder
+  it('masks a value resolved from ${VAR} that the failing server printed to its stderr', async () => {
+    process.env.TWICESHY_TEST_SECRET = SECRET;
+    const script =
+      "process.stderr.write('using key ' + process.env.TWICESHY_TEST_SECRET + '\\n'); process.exit(1);";
+    const config = writeConfig({
+      store: { type: 'memory' },
+      mcpServers: {
+        leaky: {
+          command: process.execPath,
+          args: ['-e', script],
+          // biome-ignore lint/suspicious/noTemplateCurlyInString: ${VAR} is the documented placeholder syntax
+          env: { TWICESHY_TEST_SECRET: '${TWICESHY_TEST_SECRET}' },
+        },
+      },
+    });
+
+    const { report } = await doctorJson(config);
+    const [failure] = failuresOf(report);
+    expect(JSON.stringify(report)).not.toContain(SECRET);
+    expect(failure?.stderr.join('\n')).toContain('[redacted]');
+
+    const captured = capture();
+    await runCli(['doctor', '--config', config], { io: captured.io, cwd: REPO_ROOT });
+    expect(captured.text()).not.toContain(SECRET);
+    expect(captured.text()).toContain('[redacted]');
+  });
+});
+
 describe('doctor logging', () => {
   it('prints no JSON log lines by default, including with --json, but does with --log-level info', async () => {
     const config = writeConfig({

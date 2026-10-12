@@ -7,6 +7,7 @@
 export * from './config.js';
 export * from './downstream.js';
 export * from './logger.js';
+export * from './mask.js';
 export * from './naming.js';
 export * from './proxy.js';
 export * from './restart.js';

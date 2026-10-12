@@ -14,6 +14,7 @@ import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ActionRecord, BeginInput, CompleteInput, EngineSettings } from '../src/index.js';
 import {
+  createGuard,
   DEFAULT_MAX_RESULT_BYTES,
   NotSerializableError,
   ResultTooLargeError,
@@ -260,6 +261,34 @@ describe('S3 schema migration', () => {
 });
 
 describe('S6 redaction on disk', () => {
+  it('S6: a structured result with secret fields never reaches the database files', async () => {
+    const path = join(tempDir(), 'actions.db');
+    const store = new SqliteStore({ path });
+    const guard = createGuard({ store });
+    const secret = 'sk_live_RESULT-SECRET';
+    const pin = 'PIN-8642-UNIQUE';
+    const outcome = await guard.run(
+      { tool: 'paystack.refund', args: { amount: 1500 } },
+      async () => ({ receipt: { secret, pin, nested: { token: secret } } }),
+    );
+    expect(outcome.status).toBe('executed');
+
+    const [record] = await guard.list({});
+    expect(record?.resultRedacted).toBe(true);
+    expect(record?.result).toEqual({
+      receipt: { secret: '[redacted]', pin: '[redacted]', nested: { token: '[redacted]' } },
+    });
+    await guard.close();
+
+    const files = [path, `${path}-wal`, `${path}-shm`].filter((file) => existsSync(file));
+    expect(files).toContain(path);
+    for (const file of files) {
+      const bytes = readFileSync(file);
+      expect(bytes.includes(secret), file).toBe(false);
+      expect(bytes.includes(pin), file).toBe(false);
+    }
+  });
+
   it('S6: never writes the fake card number or PIN to the database or WAL files', async () => {
     const path = join(tempDir(), 'actions.db');
     const store = new SqliteStore({ path });

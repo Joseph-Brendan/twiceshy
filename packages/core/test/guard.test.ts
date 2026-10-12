@@ -18,6 +18,7 @@ import type {
 import {
   ConfigInvalidError,
   createGuard,
+  DownstreamUnavailableError,
   definiteFailure,
   InDoubtError,
   InProgressError,
@@ -1107,6 +1108,53 @@ describe.each(STORE_CASES)('C20 amendments with $name', ({ createStore }) => {
 
     const [record] = await guard.list({});
     expect(record?.state).toBe('IN_DOUBT');
+  });
+
+  it('C20.8: errorSummary is a safe description that never contains the raw message', async () => {
+    const store = createStore();
+    const clock = makeClock();
+    const guard = makeGuard(store, clock, { timeoutMs: 1_000 });
+
+    const ambiguous = new Error('the provider leaked sk_live_TESTSECRET');
+    await expect(
+      guard.run({ tool: 'pay.ambiguous', args: { i: 1 } }, () => {
+        throw ambiguous;
+      }),
+    ).rejects.toBe(ambiguous);
+    const [inDoubt] = await guard.list({ toolName: 'pay.ambiguous' });
+    expect(inDoubt?.errorSummary).toBe('Error [none/ambiguous]: ambiguous error');
+    expect(inDoubt?.errorSummary).not.toContain('sk_live_TESTSECRET');
+
+    const definite = definiteFailure(new Error('invalid input'));
+    await expect(
+      guard.run({ tool: 'pay.definite', args: { i: 2 } }, () => {
+        throw definite;
+      }),
+    ).rejects.toBe(definite);
+    const [failed] = await guard.list({ toolName: 'pay.definite' });
+    expect(failed?.errorSummary).toContain('definite failure');
+    expect(failed?.errorSummary).not.toContain('invalid input');
+
+    const crashed = new DownstreamUnavailableError({ server: 'paystack' });
+    await expect(
+      guard.run({ tool: 'pay.crashed', args: { i: 3 } }, () => {
+        throw crashed;
+      }),
+    ).rejects.toBe(crashed);
+    const [downstream] = await guard.list({ toolName: 'pay.crashed' });
+    expect(downstream?.errorSummary).toContain('DOWNSTREAM_UNAVAILABLE');
+    expect(downstream?.errorSummary).toContain('downstream crashed');
+
+    const running = controlled<string>();
+    const call = guard.run({ tool: 'pay.timeout', args: { i: 4 } }, () => running.promise);
+    await flushAsync();
+    const rejection = expect(call).rejects.toBeInstanceOf(InDoubtError);
+    await clock.advance(1_000);
+    await rejection;
+    const [timedOut] = await guard.list({ toolName: 'pay.timeout' });
+    expect(timedOut?.errorSummary).toBe('none [none/ambiguous]: timeout after 1000 ms');
+    running.resolve('late');
+    await flushAsync();
   });
 
   it('a late ambiguous failure after a timeout adds no late event and leaves the record in doubt', async () => {

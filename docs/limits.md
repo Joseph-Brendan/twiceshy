@@ -52,7 +52,15 @@ When an identical call is already running, a second caller waits up to `waitForI
 
 ## Large results become summaries
 
-A result above `maxResultBytes`, 256 KB by default, is not stored in full. The record keeps a short summary such as `[result not stored: 300000 bytes]`. A duplicate then returns that summary, not the full result. Raise the limit or set `storeResult: false` deliberately.
+A result above `maxResultBytes`, 256 KB by default, is not stored in full and the write fails with `RESULT_TOO_LARGE`. Raise the limit, or set `storeResult: false` deliberately.
+
+## storeResult: false keeps no result
+
+With `storeResult: false`, Twiceshy stores no result at all for the action. A duplicate then returns a short text summary saying the action already ran, not the original result. Use it for tools whose results are large or contain data you do not want on disk, and accept that a duplicate shows only the summary.
+
+## Results are redacted before storage
+
+Like arguments, a successful result is written through the same field-name redaction list (the built-in one plus your `redact` extras). A duplicate returns that stored, redacted copy, and `_meta["dev.twiceshy/outcome"].resultRedacted` is `true` when any field was replaced. The first caller still gets the real, unredacted result.
 
 ## Templated resource reads are not matched back
 
@@ -60,4 +68,4 @@ The proxy forwards resources from downstream servers. A read of a concrete resou
 
 ## Free text can still reach the record
 
-Redaction hides private fields, but it does not remove free text from stored arguments when the developer did not list it. Keep the built-in redaction list, and add extra fields when your tools use unusual names.
+Redaction works by field name, so it cannot find a secret hidden inside free text such as a `note`, `reason`, or `message` field, or inside a result string. A tool that echoes a key into a field with an unusual name will still have that text stored, for arguments and for results alike. Keep the built-in redaction list, add extra field names when your tools use unusual ones, and prefer `storeResult: false` for tools that return sensitive free text.

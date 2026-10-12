@@ -21,6 +21,7 @@ import type {
 } from 'twiceshy';
 import {
   ConfigInvalidError,
+  classifyError,
   classifyToolResult,
   createGuard,
   DownstreamUnavailableError,
@@ -35,6 +36,7 @@ import type { ProxyConfig, ToolOptions } from './config.js';
 import type { DownstreamConnection, DownstreamFailure, Downstreams } from './downstream.js';
 import { connectAllDownstreams, listAllTools } from './downstream.js';
 import { createLogger, type Logger, redirectConsoleToStderr } from './logger.js';
+import { createSecretMasker } from './mask.js';
 import { buildToolRouting, exposeName, type ToolNaming, type ToolRouting } from './naming.js';
 import { PROXY_VERSION } from './version.js';
 
@@ -76,6 +78,8 @@ export interface DuplicateOutcomeMeta {
   recordId: string;
   fingerprint: string;
   originalAt: string | null;
+  /** True when redaction replaced at least one field of the stored result (C20 rule 6). */
+  resultRedacted: boolean;
 }
 
 interface ToolRoute {
@@ -120,6 +124,14 @@ function describeError(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
+/** C20 rule 5: raw error text is logged only at debug level. */
+function safeErrorText(logger: Logger, cause: unknown): string {
+  if (logger.level === 'debug') {
+    return describeError(cause);
+  }
+  return cause instanceof Error ? cause.name : typeof cause;
+}
+
 function toolText(text: string, isError = false): CallToolResult {
   return isError
     ? { isError: true, content: [{ type: 'text', text }] }
@@ -152,9 +164,13 @@ function formatUtcTime(date: Date): string {
   return `${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}:${pad2(date.getUTCSeconds())}`;
 }
 
-/** C8 duplicate result: original unchanged, `_meta` added, optional text block. */
+/**
+ * C8 duplicate result: the original stored result unchanged, `_meta` added,
+ * optional text block. When `storeResult: false` kept no result, the duplicate
+ * is a short text summary saying the action already ran (C20 rule 6).
+ */
 export function duplicateResult(
-  original: CallToolResult,
+  original: CallToolResult | undefined,
   record: ActionRecord,
   originalAt: Date | null,
   annotateDuplicates: boolean,
@@ -164,7 +180,23 @@ export function duplicateResult(
     recordId: record.id,
     fingerprint: record.fingerprint,
     originalAt: originalAt === null ? null : originalAt.toISOString(),
+    resultRedacted: record.resultRedacted,
   };
+  if (original === undefined || (record.resultTruncated && record.result === undefined)) {
+    const when = formatUtcTime(originalAt ?? record.completedAt ?? new Date());
+    return {
+      content: [
+        {
+          type: 'text',
+          text:
+            `Twiceshy: this action already ran at ${when} UTC and was not repeated. ` +
+            'No result was stored for it, so the original result cannot be shown. ' +
+            'If the user really wants it done again, ask them to confirm, then tell them a person must approve the repeat.',
+        },
+      ],
+      _meta: { [OUTCOME_META_KEY]: outcome },
+    };
+  }
   const withMeta: CallToolResult = {
     ...original,
     _meta: { ...original._meta, [OUTCOME_META_KEY]: outcome },
@@ -221,33 +253,63 @@ function toProxyTool(tool: ProxyTool): Tool {
   };
 }
 
+/**
+ * C20 rule 5: below debug, an event carries only the error's class name,
+ * Twiceshy code, and classification. The full downstream message is written
+ * only at debug, where the docs warn it may contain downstream text.
+ */
+function safeErrorField(logger: Logger, event: GuardEvent): unknown {
+  if (event.error === undefined) {
+    return undefined;
+  }
+  if (logger.level === 'debug') {
+    return event.error;
+  }
+  const name = event.error instanceof Error ? event.error.name : typeof event.error;
+  const code = isTwiceshyError(event.error) ? event.error.code : undefined;
+  const classification =
+    event.reason === 'definite' || event.reason === 'ambiguous'
+      ? event.reason
+      : classifyError(event.error).classification;
+  return {
+    name,
+    classification,
+    ...(code === undefined ? {} : { code }),
+  };
+}
+
 /** One structured JSON line per guard event, at the C15-recommended level. */
 function logGuardEvent(logger: Logger, event: GuardEvent): void {
   const child = logger.child(event.server);
+  const fields =
+    event.error === undefined ? { ...event } : { ...event, error: safeErrorField(logger, event) };
   switch (event.type) {
     case 'execute':
-      child.debug(`executed ${event.tool}`, { ...event });
+      child.debug(`executed ${event.tool}`, fields);
       break;
     case 'duplicate':
-      child.info(`duplicate ${event.tool}`, { ...event });
+      child.info(`duplicate ${event.tool}`, fields);
       break;
     case 'blocked':
-      child.warn(`blocked ${event.tool}`, { ...event });
+      child.warn(`blocked ${event.tool}`, fields);
       break;
     case 'in-doubt':
-      child.warn(`in doubt ${event.tool}`, { ...event });
+      child.warn(`in doubt ${event.tool}`, fields);
       break;
     case 'late-completion':
-      child.info(`late completion ${event.tool}`, { ...event });
+      child.info(`late completion ${event.tool}`, fields);
+      break;
+    case 'resolution-conflict':
+      child.error(`resolution conflict for ${event.tool}`, fields);
       break;
     case 'store-write-failed':
-      child.error(`store write failed for ${event.tool}`, { ...event });
+      child.error(`store write failed for ${event.tool}`, fields);
       break;
     case 'guard-bypassed':
-      child.warn(`guard bypassed for ${event.tool}`, { ...event });
+      child.warn(`guard bypassed for ${event.tool}`, fields);
       break;
     case 'warning':
-      child.warn(`warning for ${event.tool}`, { ...event });
+      child.warn(`warning for ${event.tool}`, fields);
       break;
   }
 }
@@ -310,6 +372,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     options.downstreams ??
     (await connectAllDownstreams(options.config.mcpServers, {
       logger,
+      maskSecrets: createSecretMasker(options.config.resolvedEnvValues),
       ...(options.clientInfo === undefined ? {} : { clientInfo: options.clientInfo }),
       onRestarted: async (connection) => {
         if (serverRef === undefined) {
@@ -353,6 +416,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
           onBlocked: (event) => logGuardEvent(logger, event),
           onInDoubt: (event) => logGuardEvent(logger, event),
           onLateCompletion: (event) => logGuardEvent(logger, event),
+          onResolutionConflict: (event) => logGuardEvent(logger, event),
           onStoreWriteFailed: (event) => logGuardEvent(logger, event),
           onGuardBypassed: (event) => logGuardEvent(logger, event),
           onWarning: (event) => logGuardEvent(logger, event),
@@ -644,6 +708,9 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
             : { ignoreFields: toolOptions.ignoreFields }),
           ...(toolOptions.normalize === undefined ? {} : { normalize: toolOptions.normalize }),
           ...(toolOptions.timeoutMs === undefined ? {} : { timeoutMs: toolOptions.timeoutMs }),
+          ...(toolOptions.storeResult === undefined
+            ? {}
+            : { storeResult: toolOptions.storeResult }),
         },
         () => callGuarded(route, request, ctx, toolOptions),
       );
@@ -689,7 +756,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       await server.sendToolListChanged();
       child.info(`tool list changed; now ${connection.tools.length} tool(s)`);
     } catch (cause) {
-      child.error(`could not refresh the tool list: ${describeError(cause)}`);
+      child.error(`could not refresh the tool list: ${safeErrorText(child, cause)}`);
     }
   };
 
@@ -702,7 +769,8 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       rebuildRouting();
       await server.sendResourceListChanged();
     } catch (cause) {
-      logger.child(connection.name).error(`could not refresh resources: ${describeError(cause)}`);
+      const child = logger.child(connection.name);
+      child.error(`could not refresh resources: ${safeErrorText(child, cause)}`);
     }
   };
 
@@ -715,7 +783,8 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       rebuildRouting();
       await server.sendPromptListChanged();
     } catch (cause) {
-      logger.child(connection.name).error(`could not refresh prompts: ${describeError(cause)}`);
+      const child = logger.child(connection.name);
+      child.error(`could not refresh prompts: ${safeErrorText(child, cause)}`);
     }
   };
 
