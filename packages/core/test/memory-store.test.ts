@@ -41,6 +41,7 @@ describe('MemoryStore specifics', () => {
     if (result.kind !== 'execute') throw new Error('expected execute');
     await expect(
       store.complete(result.record.id, {
+        attemptToken: result.record.attemptToken,
         outcome: { type: 'success', result: { callback: () => undefined } },
         now: NOW,
         settings: SETTINGS,

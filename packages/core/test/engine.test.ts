@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type {
   DecisionKind,
+  EngineClaimedRecord,
   EngineRecord,
   EngineSettings,
   ExecutionOutcome,
@@ -8,6 +9,7 @@ import type {
 } from '../src/index.js';
 import {
   afterExecution,
+  completeRecord,
   decide,
   lateCompletion,
   leaseExpired,
@@ -436,6 +438,163 @@ describe('lateCompletion', () => {
   });
 });
 
+describe('completeRecord (C20 rule 1)', () => {
+  function makeClaimed(overrides: Partial<EngineClaimedRecord> = {}): EngineClaimedRecord {
+    return { ...makeRecord(overrides), attemptToken: 'token-1' };
+  }
+
+  it('C20.1: the claiming token writes the outcome while the record is still in flight', () => {
+    const decision = completeRecord(
+      makeClaimed({ state: 'IN_FLIGHT' }),
+      { attemptToken: 'token-1', outcome: { type: 'success', result: 7 } },
+      NOW,
+      SETTINGS,
+    );
+    expect(decision.path).toBe('outcome');
+    expect(decision.patch.state).toBe('SUCCEEDED');
+    expect(decision.patch.result).toBe(7);
+  });
+
+  it('C20.1: any other attempt token changes nothing', () => {
+    const decision = completeRecord(
+      makeClaimed({ state: 'IN_FLIGHT' }),
+      { attemptToken: 'token-2', outcome: { type: 'success', result: 7 } },
+      NOW,
+      SETTINGS,
+    );
+    expect(decision).toEqual({ path: 'changed', patch: {} });
+  });
+
+  it('C20.2: an in-doubt record is upgraded through late completion', () => {
+    const success = completeRecord(
+      makeClaimed({ state: 'IN_DOUBT', completedAt: null }),
+      { attemptToken: 'token-1', outcome: { type: 'success', result: 'late' } },
+      NOW,
+      SETTINGS,
+    );
+    expect(success.path).toBe('late-completion');
+    expect(success.patch.state).toBe('SUCCEEDED');
+
+    const ambiguous = completeRecord(
+      makeClaimed({ state: 'IN_DOUBT', completedAt: null }),
+      { attemptToken: 'token-1', outcome: { type: 'ambiguous-failure' } },
+      NOW,
+      SETTINGS,
+    );
+    expect(ambiguous).toEqual({ path: 'late-completion', patch: {} });
+  });
+
+  it('C20.3: a definite late failure agrees with a human "failed" decision', () => {
+    const definite = completeRecord(
+      makeClaimed({ state: 'RESOLVED_FAILED' }),
+      { attemptToken: 'token-1', outcome: { type: 'definite-failure' } },
+      NOW,
+      SETTINGS,
+    );
+    expect(definite).toEqual({ path: 'agrees-with-resolution', patch: {} });
+
+    const cancelled = completeRecord(
+      makeClaimed({ state: 'RESOLVED_FAILED' }),
+      { attemptToken: 'token-1', outcome: { type: 'cancelled-before-start' } },
+      NOW,
+      SETTINGS,
+    );
+    expect(cancelled).toEqual({ path: 'agrees-with-resolution', patch: {} });
+  });
+
+  it('C20.3: a late success against a human "failed" decision blocks with IN_DOUBT', () => {
+    const decision = completeRecord(
+      makeClaimed({ state: 'RESOLVED_FAILED' }),
+      { attemptToken: 'token-1', outcome: { type: 'success', result: 'late' } },
+      NOW,
+      SETTINGS,
+    );
+    expect(decision.path).toBe('resolution-conflict');
+    expect(decision.patch.state).toBe('IN_DOUBT');
+    expect(decision.patch.leaseUntil).toBeNull();
+  });
+
+  it('C20.3: an ambiguous late result against a human "failed" decision also conflicts', () => {
+    const decision = completeRecord(
+      makeClaimed({ state: 'RESOLVED_FAILED' }),
+      { attemptToken: 'token-1', outcome: { type: 'cancelled' } },
+      NOW,
+      SETTINGS,
+    );
+    expect(decision.path).toBe('resolution-conflict');
+    expect(decision.patch.state).toBe('IN_DOUBT');
+  });
+
+  it('C20.3: a late success agrees with a human "succeeded" decision, but other results conflict without a state change', () => {
+    const agrees = completeRecord(
+      makeClaimed({ state: 'RESOLVED_SUCCEEDED' }),
+      { attemptToken: 'token-1', outcome: { type: 'success', result: 'again' } },
+      NOW,
+      SETTINGS,
+    );
+    expect(agrees).toEqual({ path: 'agrees-with-resolution', patch: {} });
+
+    const conflict = completeRecord(
+      makeClaimed({ state: 'RESOLVED_SUCCEEDED' }),
+      { attemptToken: 'token-1', outcome: { type: 'definite-failure' } },
+      NOW,
+      SETTINGS,
+    );
+    expect(conflict).toEqual({ path: 'resolution-conflict', patch: {} });
+  });
+
+  it('a terminal record reports that it changed', () => {
+    expect(
+      completeRecord(
+        makeClaimed({ state: 'SUCCEEDED' }),
+        { attemptToken: 'token-1', outcome: { type: 'success', result: 1 } },
+        NOW,
+        SETTINGS,
+      ).path,
+    ).toBe('changed');
+    expect(
+      completeRecord(
+        makeClaimed({ state: 'FAILED_DEFINITE' }),
+        { attemptToken: 'token-1', outcome: { type: 'definite-failure' } },
+        NOW,
+        SETTINGS,
+      ).path,
+    ).toBe('changed');
+  });
+
+  it('C20.4: a cancellation before start is a definite failure', () => {
+    const patch = afterExecution(
+      makeRecord({ state: 'IN_FLIGHT' }),
+      { type: 'cancelled-before-start' },
+      NOW,
+      SETTINGS,
+    );
+    expect(patch.state).toBe('FAILED_DEFINITE');
+    expect(patch.completedAt).toEqual(NOW);
+    expect(patch.leaseUntil).toBeNull();
+
+    const late = lateCompletion(
+      makeRecord({ state: 'IN_DOUBT', completedAt: null }),
+      { type: 'cancelled-before-start' },
+      NOW,
+    );
+    expect(late.state).toBe('FAILED_DEFINITE');
+  });
+
+  it('completeRecord throws STORE_UNAVAILABLE for an unknown record state', () => {
+    const error = captureError(() =>
+      completeRecord(
+        makeClaimed({ id: 'rec-complete', state: 'BANANA' as RecordState }),
+        { attemptToken: 'token-1', outcome: { type: 'success', result: 1 } },
+        NOW,
+        SETTINGS,
+      ),
+    );
+    expectStoreUnavailable(error, 'rec-complete');
+    expect((error as StoreUnavailableError).what).toContain('record state');
+  });
+});
+
 describe('purity', () => {
   it('decision functions never mutate their inputs', () => {
     const record = makeRecord({ state: 'IN_FLIGHT', leaseUntil: new Date(NOW.getTime() + 1_000) });
@@ -445,7 +604,14 @@ describe('purity', () => {
     afterExecution(record, { type: 'definite-failure' }, NOW, SETTINGS);
     afterExecution(record, { type: 'ambiguous-failure' }, NOW, SETTINGS);
     afterExecution(record, { type: 'cancelled' }, NOW, SETTINGS);
+    afterExecution(record, { type: 'cancelled-before-start' }, NOW, SETTINGS);
     lateCompletion(record, { type: 'success', result: 1 }, NOW);
+    completeRecord(
+      { ...record, attemptToken: 'token-1' },
+      { attemptToken: 'token-1', outcome: { type: 'success', result: { a: 1 } } },
+      NOW,
+      SETTINGS,
+    );
     leaseExpired(record, NOW);
     expect(record).toEqual(before);
   });

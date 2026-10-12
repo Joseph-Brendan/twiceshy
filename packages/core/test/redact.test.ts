@@ -3,6 +3,7 @@ import {
   DEFAULT_REDACT_FIELDS,
   NotSerializableError,
   redact,
+  redactReporting,
   TwiceshyError,
 } from '../src/index.js';
 
@@ -208,5 +209,22 @@ describe('redact', () => {
     expect(output.when).toBeInstanceOf(Date);
     expect(output.when).not.toBe(when);
     expect(output.when.getTime()).toBe(when.getTime());
+  });
+});
+
+describe('redactReporting', () => {
+  it('reports true only when a field was replaced', () => {
+    const withSecret = redactReporting({ receipt: { secret: 'sk_live_x' }, amount: 1500 });
+    expect(withSecret.redacted).toBe(true);
+    expect((withSecret.value as { receipt: { secret: string } }).receipt.secret).toBe(REDACTED);
+
+    const clean = redactReporting({ receipt: { id: 'R1' }, amount: 1500 });
+    expect(clean.redacted).toBe(false);
+    expect(clean.value).toEqual({ receipt: { id: 'R1' }, amount: 1500 });
+  });
+
+  it('reports true for a secret at any depth or inside an array', () => {
+    expect(redactReporting({ items: [{ note: 'x' }, { pin: '1234' }] }).redacted).toBe(true);
+    expect(redactReporting([1, 'two', { card: { number: '4111' } }]).redacted).toBe(true);
   });
 });

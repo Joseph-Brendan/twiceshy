@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type BetterSqlite3 from 'better-sqlite3';
 import type { RecordState } from '../engine.js';
-import { afterExecution, decide, lateCompletion } from '../engine.js';
+import { completeRecord, decide } from '../engine.js';
 import {
   isTwiceshyError,
   NotSerializableError,
@@ -19,6 +19,7 @@ import type {
   BeginInput,
   BeginResult,
   CompleteInput,
+  CompleteResult,
   ListFilter,
   RepeatGrant,
   Resolution,
@@ -112,6 +113,15 @@ const MIGRATIONS: readonly { version: number; up: (db: SqliteDatabase) => void }
         CREATE INDEX IF NOT EXISTS idx_actions_fingerprint ON actions (fingerprint);
         CREATE INDEX IF NOT EXISTS idx_actions_state ON actions (state);
         CREATE INDEX IF NOT EXISTS idx_actions_completed_at ON actions (completed_at);
+      `);
+    },
+  },
+  {
+    version: 2,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE actions ADD COLUMN attempt_token TEXT NOT NULL DEFAULT '';
+        ALTER TABLE actions ADD COLUMN result_redacted INTEGER NOT NULL DEFAULT 0;
       `);
     },
   },
@@ -222,9 +232,11 @@ interface ActionRow {
   scope: string;
   state: string;
   attempt: number;
+  attempt_token: string;
   redacted_args: string | null;
   result: string | null;
   result_truncated: number;
+  result_redacted: number;
   error_summary: string | null;
   created_at: number;
   started_at: number;
@@ -311,9 +323,11 @@ function rowToRecord(row: ActionRow): ActionRecord {
     scope: row.scope,
     state: row.state as RecordState,
     attempt: row.attempt,
+    attemptToken: row.attempt_token,
     redactedArgs: fromJsonText(row.redacted_args),
     result: fromJsonText(row.result),
     resultTruncated: row.result_truncated === 1,
+    resultRedacted: row.result_redacted === 1,
     errorSummary: row.error_summary,
     createdAt: new Date(row.created_at),
     startedAt: new Date(row.started_at),
@@ -329,12 +343,14 @@ function rowToRecord(row: ActionRow): ActionRecord {
 const INSERT_SQL = `
   INSERT INTO actions (
     id, identity, fingerprint, explicit_key, server_id, tool_name, scope, state, attempt,
-    redacted_args, result, result_truncated, error_summary, created_at, started_at,
-    completed_at, lease_expires_at, resolved_at, resolved_by, resolution_note, repeat_grant
+    attempt_token, redacted_args, result, result_truncated, result_redacted, error_summary,
+    created_at, started_at, completed_at, lease_expires_at, resolved_at, resolved_by,
+    resolution_note, repeat_grant
   ) VALUES (
     @id, @identity, @fingerprint, @explicitKey, @serverId, @toolName, @scope, @state, @attempt,
-    @redactedArgs, @result, @resultTruncated, @errorSummary, @createdAt, @startedAt,
-    @completedAt, @leaseExpiresAt, @resolvedAt, @resolvedBy, @resolutionNote, @repeatGrant
+    @attemptToken, @redactedArgs, @result, @resultTruncated, @resultRedacted, @errorSummary,
+    @createdAt, @startedAt, @completedAt, @leaseExpiresAt, @resolvedAt, @resolvedBy,
+    @resolutionNote, @repeatGrant
   )
 `;
 
@@ -342,8 +358,10 @@ const RESTART_SQL = `
   UPDATE actions SET
     state = @state,
     attempt = @attempt,
+    attempt_token = @attemptToken,
     result = NULL,
     result_truncated = 0,
+    result_redacted = 0,
     started_at = @startedAt,
     completed_at = NULL,
     lease_expires_at = @leaseExpiresAt,
@@ -369,7 +387,8 @@ const COMPLETE_WITH_RESULT_SQL = `
     lease_expires_at = @leaseExpiresAt,
     error_summary = @errorSummary,
     result = @result,
-    result_truncated = @resultTruncated
+    result_truncated = @resultTruncated,
+    result_redacted = @resultRedacted
   WHERE id = @id
 `;
 
@@ -414,8 +433,10 @@ export class SqliteStore implements ActionStore {
               ...existing,
               state: 'IN_FLIGHT',
               attempt: decision.changes.attempt as number,
+              attemptToken: randomUUID(),
               result: undefined,
               resultTruncated: false,
+              resultRedacted: false,
               startedAt: input.now,
               completedAt: null,
               leaseExpiresAt: leaseUntil,
@@ -425,6 +446,7 @@ export class SqliteStore implements ActionStore {
               id: restarted.id,
               state: restarted.state,
               attempt: restarted.attempt,
+              attemptToken: restarted.attemptToken,
               startedAt: restarted.startedAt.getTime(),
               leaseExpiresAt: leaseUntil.getTime(),
             });
@@ -441,9 +463,11 @@ export class SqliteStore implements ActionStore {
             scope: input.scope,
             state: 'IN_FLIGHT',
             attempt: decision.changes.attempt as number,
+            attemptToken: randomUUID(),
             redactedArgs: input.redactedArgs,
             result: undefined,
             resultTruncated: false,
+            resultRedacted: false,
             errorSummary: null,
             createdAt: input.now,
             startedAt: input.now,
@@ -464,9 +488,11 @@ export class SqliteStore implements ActionStore {
             scope: record.scope,
             state: record.state,
             attempt: record.attempt,
+            attemptToken: record.attemptToken,
             redactedArgs: toJsonText(input.redactedArgs, 'arguments'),
             result: null,
             resultTruncated: 0,
+            resultRedacted: 0,
             errorSummary: null,
             createdAt: record.createdAt.getTime(),
             startedAt: record.startedAt.getTime(),
@@ -527,44 +553,51 @@ export class SqliteStore implements ActionStore {
     });
   }
 
-  async complete(id: string, input: CompleteInput): Promise<void> {
+  async complete(id: string, input: CompleteInput): Promise<CompleteResult> {
     return this.wrap('complete', () => {
-      const tx = this.db.transaction((): void => {
+      const tx = this.db.transaction((): CompleteResult => {
+        // The read, the conditional check, and the write run inside one
+        // BEGIN IMMEDIATE transaction (C20 rule 1).
         const row = this.findRowById(id);
         if (row === undefined) {
           throw recordNotFound(id);
         }
         const record = rowToRecord(row);
-        if (record.state !== 'IN_FLIGHT' && record.state !== 'IN_DOUBT') {
-          // Never overwrite a terminal state set by another process or a human.
-          return;
+        const decision = completeRecord(
+          toEngineRecord(record),
+          { attemptToken: input.attemptToken, outcome: input.outcome },
+          input.now,
+          input.settings,
+        );
+        if (decision.path === 'changed' || decision.path === 'agrees-with-resolution') {
+          return { path: decision.path, written: false, record };
         }
-        const patch =
-          record.state === 'IN_FLIGHT'
-            ? afterExecution(toEngineRecord(record), input.outcome, input.now, input.settings)
-            : lateCompletion(toEngineRecord(record), input.outcome, input.now);
-        const updated = applyPatch(record, patch);
+        if (Object.keys(decision.patch).length === 0) {
+          return { path: decision.path, written: false, record };
+        }
+        const updated = applyPatch(record, decision.patch);
         const maxBytes = input.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES;
-        const resultChanged = 'result' in patch;
+        const resultChanged = 'result' in decision.patch;
         let resultText: string | null = null;
         let resultTruncated = 0;
+        let resultRedacted = 0;
         if (resultChanged) {
-          if (patch.result === undefined) {
+          if (decision.patch.result === undefined) {
             // A definite failure clears any stale result.
             resultText = null;
             resultTruncated = 0;
+          } else if (input.storeResult === false) {
+            // C20 rule 6: store no result at all.
+            resultText = null;
+            resultTruncated = 1;
           } else {
-            const fullText = toJsonText(patch.result, 'result') as string;
+            const fullText = toJsonText(decision.patch.result, 'result') as string;
             const bytes = Buffer.byteLength(fullText, 'utf8');
-            if (input.storeResult === false) {
-              resultText = JSON.stringify(`[result not stored: ${bytes} bytes]`);
-              resultTruncated = 1;
-            } else if (bytes > maxBytes) {
+            if (bytes > maxBytes) {
               throw new ResultTooLargeError({ sizeBytes: bytes, maxBytes, recordId: id });
-            } else {
-              resultText = fullText;
-              resultTruncated = 0;
             }
+            resultText = fullText;
+            resultRedacted = input.resultRedacted === true ? 1 : 0;
           }
         }
         const params = {
@@ -580,12 +613,23 @@ export class SqliteStore implements ActionStore {
             ...params,
             result: resultText,
             resultTruncated,
+            resultRedacted,
           });
         } else {
           this.statement(COMPLETE_SQL).run(params);
         }
+        return {
+          path: decision.path,
+          written: true,
+          record: {
+            ...updated,
+            result: fromJsonText(resultText),
+            resultTruncated: resultTruncated === 1,
+            resultRedacted: resultRedacted === 1,
+          },
+        };
       });
-      tx.immediate();
+      return tx.immediate();
     });
   }
 

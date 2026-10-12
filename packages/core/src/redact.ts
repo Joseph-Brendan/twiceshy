@@ -48,6 +48,7 @@ function redactValue(
   path: readonly string[],
   seen: WeakSet<object>,
   matcher: RedactionMatcher,
+  report: { redacted: boolean },
 ): unknown {
   if (value === null || typeof value !== 'object') {
     return value;
@@ -62,7 +63,7 @@ function redactValue(
   try {
     if (Array.isArray(value)) {
       return value.map((item, index) =>
-        redactValue(item, prefix, [...path, String(index)], seen, matcher),
+        redactValue(item, prefix, [...path, String(index)], seen, matcher, report),
       );
     }
     const output: Record<string, unknown> = {};
@@ -71,6 +72,7 @@ function redactValue(
       const candidate = [...prefix, lowerKey];
       if (matcher.fullNames.has(lowerKey) || matcher.fullNames.has(candidate.join('.'))) {
         output[key] = REDACTED;
+        report.redacted = true;
         continue;
       }
       const childPrefix = hasLongerPath(matcher.paths, candidate) ? candidate : [];
@@ -80,6 +82,7 @@ function redactValue(
         [...path, key],
         seen,
         matcher,
+        report,
       );
     }
     return output;
@@ -96,6 +99,19 @@ function redactValue(
  * name the path where the cycle was found.
  */
 export function redact(value: unknown, extraFields: readonly string[] = []): unknown {
+  return redactReporting(value, extraFields).value;
+}
+
+/**
+ * Like `redact`, but also reports whether any field was actually replaced.
+ * The guard uses this before storing a result (C20 rule 6).
+ */
+export function redactReporting(
+  value: unknown,
+  extraFields: readonly string[] = [],
+): { value: unknown; redacted: boolean } {
   const matcher = buildMatcher([...DEFAULT_REDACT_FIELDS, ...extraFields]);
-  return redactValue(value, [], [], new WeakSet(), matcher);
+  const report = { redacted: false };
+  const output = redactValue(value, [], [], new WeakSet(), matcher, report);
+  return { value: output, redacted: report.redacted };
 }

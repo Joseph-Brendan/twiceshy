@@ -7,17 +7,19 @@ import {
   ConfigInvalidError,
   InDoubtError,
   InProgressError,
+  isTwiceshyError,
   KeyConflictError,
   StoreUnavailableError,
 } from './errors.js';
 import type { NormalizerMap } from './fingerprint.js';
 import { computeFingerprint } from './fingerprint.js';
-import { redact } from './redact.js';
+import { redact, redactReporting } from './redact.js';
 import type {
   ActionRecord,
   ActionStore,
   BeginInput,
   BeginResult,
+  CompleteResult,
   ListFilter,
   RepeatGrant,
 } from './stores/types.js';
@@ -73,6 +75,7 @@ export type GuardEventType =
   | 'blocked'
   | 'in-doubt'
   | 'late-completion'
+  | 'resolution-conflict'
   | 'store-write-failed'
   | 'guard-bypassed'
   | 'warning';
@@ -103,6 +106,8 @@ export interface GuardHooks {
   onBlocked?: (event: GuardEvent) => void;
   onInDoubt?: (event: GuardEvent) => void;
   onLateCompletion?: (event: GuardEvent) => void;
+  /** A late result contradicts a human resolution (C20 rule 3). */
+  onResolutionConflict?: (event: GuardEvent) => void;
   onStoreWriteFailed?: (event: GuardEvent) => void;
   onGuardBypassed?: (event: GuardEvent) => void;
   onWarning?: (event: GuardEvent) => void;
@@ -114,6 +119,7 @@ const HOOK_FOR_EVENT: Readonly<Record<GuardEventType, keyof GuardHooks>> = {
   blocked: 'onBlocked',
   'in-doubt': 'onInDoubt',
   'late-completion': 'onLateCompletion',
+  'resolution-conflict': 'onResolutionConflict',
   'store-write-failed': 'onStoreWriteFailed',
   'guard-bypassed': 'onGuardBypassed',
   warning: 'onWarning',
@@ -378,6 +384,7 @@ const optionsSchema = z.object({
       onBlocked: hookSchema.optional(),
       onInDoubt: hookSchema.optional(),
       onLateCompletion: hookSchema.optional(),
+      onResolutionConflict: hookSchema.optional(),
       onStoreWriteFailed: hookSchema.optional(),
       onGuardBypassed: hookSchema.optional(),
       onWarning: hookSchema.optional(),
@@ -409,6 +416,9 @@ function normalizeHooks(hooks: z.infer<typeof optionsSchema>['hooks']): GuardHoo
     ...(hooks.onBlocked === undefined ? {} : { onBlocked: hooks.onBlocked }),
     ...(hooks.onInDoubt === undefined ? {} : { onInDoubt: hooks.onInDoubt }),
     ...(hooks.onLateCompletion === undefined ? {} : { onLateCompletion: hooks.onLateCompletion }),
+    ...(hooks.onResolutionConflict === undefined
+      ? {}
+      : { onResolutionConflict: hooks.onResolutionConflict }),
     ...(hooks.onStoreWriteFailed === undefined
       ? {}
       : { onStoreWriteFailed: hooks.onStoreWriteFailed }),
@@ -541,6 +551,8 @@ interface ExecuteContext extends EventContext {
   timeoutMs: number;
   signal: AbortSignal | undefined;
   storeResult: boolean | undefined;
+  /** The claim token for this attempt; `complete` checks it atomically (C20). */
+  attemptToken: string;
 }
 
 interface EventExtras {
@@ -787,6 +799,7 @@ class DefaultGuard implements Guard {
       timeoutMs,
       signal: request.signal,
       storeResult: request.storeResult,
+      attemptToken: decision.record.attemptToken,
     };
     return this.executeClaim<T>(decision.record, fn, executeContext);
   }
@@ -809,10 +822,20 @@ class DefaultGuard implements Guard {
     context: ExecuteContext,
   ): Promise<GuardOutcome<T>> {
     if (context.signal?.aborted === true) {
-      // Cancelled before the tool ran: C6 says a cancelled call becomes
-      // IN_DOUBT, and the safe direction is to refuse a silent retry.
-      await this.recordCompletion(record.id, { type: 'cancelled' }, context);
-      this.emit('in-doubt', { ...context, recordId: record.id }, { reason: 'cancelled' });
+      // C20 rule 4: the tool function was never invoked, so the action
+      // certainly did not happen. Record a definite failure, which is safe
+      // to retry, with the documented reason.
+      await this.completeOutcome(
+        record.id,
+        { type: 'cancelled-before-start' },
+        context,
+        safeErrorSummary({ classification: 'definite', reason: 'cancelled before start' }),
+      );
+      this.emit(
+        'blocked',
+        { ...context, recordId: record.id },
+        { reason: 'cancelled before start' },
+      );
       throw new InDoubtError({ recordId: record.id, fingerprint: context.fingerprint });
     }
     const stopRenewal = this.startLeaseRenewal(record.id, context.settings.leaseMs);
@@ -821,10 +844,20 @@ class DefaultGuard implements Guard {
       const raced = await running.race();
       running.stop();
       if (raced === TIMEOUT || raced === ABORTED) {
-        const reason = raced === TIMEOUT ? 'timeout' : 'cancelled';
-        const outcome: ExecutionOutcome =
-          raced === TIMEOUT ? { type: 'ambiguous-failure' } : { type: 'cancelled' };
-        await this.recordCompletion(record.id, outcome, context);
+        const isTimeout = raced === TIMEOUT;
+        const reason = isTimeout ? 'timeout' : 'cancelled';
+        const outcome: ExecutionOutcome = isTimeout
+          ? { type: 'ambiguous-failure' }
+          : { type: 'cancelled' };
+        await this.completeOutcome(
+          record.id,
+          outcome,
+          context,
+          safeErrorSummary({
+            classification: 'ambiguous',
+            reason: isTimeout ? `timeout after ${context.timeoutMs} ms` : 'cancelled',
+          }),
+        );
         this.emit('in-doubt', { ...context, recordId: record.id }, { reason });
         // Keep listening: a late result upgrades the in-doubt record (C6).
         this.watchLateCompletion(record.id, running.settled(), context);
@@ -842,51 +875,77 @@ class DefaultGuard implements Guard {
     settled: Settled<T>,
     context: ExecuteContext,
   ): Promise<GuardOutcome<T>> {
-    // A read failure here must not hide the tool's result (C9 rule 3), so the
-    // guard falls back to treating the record as still in flight.
+    // The re-read below only shapes the events; the store enforces the
+    // conditional write itself, so a failed read can never overwrite a state
+    // set by another process or a human (C20 rule 1).
     const current = await this.reload(record.id, context);
-    const state = current?.state;
-
-    if (state === 'IN_DOUBT') {
-      const applied = await this.recordCompletion(record.id, this.outcomeFor(settled), context);
-      const after = applied ? await this.reload(record.id, context) : null;
-      if (after !== null && (after.state === 'SUCCEEDED' || after.state === 'FAILED_DEFINITE')) {
-        this.emit(
-          'late-completion',
-          { ...context, recordId: record.id, attempt: after.attempt },
-          { reason: 'result arrived after in-doubt' },
-        );
-      }
-      return this.returnOrThrow(settled, after ?? current ?? record);
-    }
-
-    if (state !== undefined && state !== 'IN_FLIGHT') {
-      // Another process or a human already decided. Never overwrite (C6).
-      this.emit(
-        'execute',
-        { ...context, recordId: record.id, attempt: current?.attempt ?? context.attempt },
-        { reason: `record already ${state}` },
-      );
+    const completion = await this.completeSettled(record.id, settled, context);
+    if (completion === null) {
+      // C9 rule 3: a failed record write must not hide the tool's result.
       return this.returnOrThrow(settled, current ?? record);
     }
 
-    const applied = await this.recordCompletion(record.id, this.outcomeFor(settled), context);
-    if (applied) {
+    if (completion.path === 'outcome') {
       this.maybePurge(context);
+      if (settled.kind === 'value') {
+        this.emit('execute', { ...context, recordId: record.id }, { reason: 'success' });
+        return {
+          status: 'executed',
+          value: settled.value,
+          record: completion.record ?? record,
+        };
+      }
+      const classification = this.classify(settled.error);
+      this.emit(
+        classification === 'definite' ? 'execute' : 'in-doubt',
+        { ...context, recordId: record.id },
+        { reason: classification, error: settled.error },
+      );
+      // C9 rule 2: the user's own error reaches the caller unchanged.
+      throw settled.error;
     }
-    if (settled.kind === 'value') {
-      this.emit('execute', { ...context, recordId: record.id }, { reason: 'success' });
-      const stored = applied ? await this.reload(record.id, context) : null;
-      return { status: 'executed', value: settled.value, record: stored ?? record };
+
+    if (completion.path === 'late-completion') {
+      if (completion.written) {
+        this.emit(
+          'late-completion',
+          {
+            ...context,
+            recordId: record.id,
+            attempt: completion.record?.attempt ?? context.attempt,
+          },
+          { reason: 'result arrived after in-doubt' },
+        );
+      }
+      return this.returnOrThrow(settled, completion.record ?? record);
     }
-    const classification = this.classify(settled.error);
+
+    if (completion.path === 'resolution-conflict') {
+      this.emit(
+        'resolution-conflict',
+        {
+          ...context,
+          recordId: record.id,
+          attempt: completion.record?.attempt ?? context.attempt,
+        },
+        { reason: 'late result contradicts the human resolution' },
+      );
+      return this.returnOrThrow(settled, completion.record ?? record);
+    }
+
+    // 'agrees-with-resolution' or 'changed': another process or a human
+    // settled the record first, so the local result is reported, not stored.
+    const state = completion.record?.state ?? 'unknown';
     this.emit(
-      classification === 'definite' ? 'execute' : 'in-doubt',
-      { ...context, recordId: record.id },
-      { reason: classification, error: settled.error },
+      'execute',
+      {
+        ...context,
+        recordId: record.id,
+        attempt: completion.record?.attempt ?? context.attempt,
+      },
+      { reason: `record already ${state}` },
     );
-    // C9 rule 2: the user's own error reaches the caller unchanged.
-    throw settled.error;
+    return this.returnOrThrow(settled, completion.record ?? record);
   }
 
   private watchLateCompletion<T>(
@@ -896,35 +955,37 @@ class DefaultGuard implements Guard {
   ): void {
     void settled
       .then(async (outcome) => {
-        const before = await this.options.store.get(recordId);
-        if (before === null || (before.state !== 'IN_DOUBT' && before.state !== 'IN_FLIGHT')) {
+        // The store decides among late-completion, human-resolution, and
+        // "nothing to do", atomically and against the current record (C20).
+        const completion = await this.completeSettled(recordId, outcome, context);
+        if (completion === null) {
           return;
         }
-        const applied = await this.recordCompletion(recordId, this.outcomeFor(outcome), context);
-        if (!applied) {
-          return;
-        }
-        const after = await this.reload(recordId, context);
-        if (after !== null && (after.state === 'SUCCEEDED' || after.state === 'FAILED_DEFINITE')) {
+        if (completion.path === 'late-completion' && completion.written) {
           this.emit(
             'late-completion',
-            { ...context, recordId, attempt: after.attempt },
+            {
+              ...context,
+              recordId,
+              attempt: completion.record?.attempt ?? context.attempt,
+            },
             { reason: 'result arrived after timeout or cancellation' },
+          );
+        } else if (completion.path === 'resolution-conflict') {
+          this.emit(
+            'resolution-conflict',
+            {
+              ...context,
+              recordId,
+              attempt: completion.record?.attempt ?? context.attempt,
+            },
+            { reason: 'late result contradicts the human resolution' },
           );
         }
       })
       .catch((error: unknown) => {
         this.writeStderr(`late completion failed: ${describeError(error)}`);
       });
-  }
-
-  private outcomeFor<T>(settled: Settled<T>): ExecutionOutcome {
-    if (settled.kind === 'value') {
-      return { type: 'success', result: settled.value };
-    }
-    return this.classify(settled.error) === 'definite'
-      ? { type: 'definite-failure' }
-      : { type: 'ambiguous-failure' };
   }
 
   private classify(error: unknown): 'definite' | 'ambiguous' {
@@ -940,24 +1001,70 @@ class DefaultGuard implements Guard {
     throw settled.error;
   }
 
+  /** Records a settled call, redacting a successful result first (C20 rule 6). */
+  private async completeSettled<T>(
+    recordId: string,
+    settled: Settled<T>,
+    context: ExecuteContext,
+  ): Promise<CompleteResult | null> {
+    if (settled.kind === 'value') {
+      if (context.storeResult === false) {
+        return this.completeOutcome(recordId, { type: 'success', result: settled.value }, context);
+      }
+      let reporting: { value: unknown; redacted: boolean };
+      try {
+        reporting = redactReporting(settled.value, this.options.redact);
+      } catch (error) {
+        this.emit('store-write-failed', { ...context, recordId }, { error });
+        return null;
+      }
+      return this.completeOutcome(
+        recordId,
+        { type: 'success', result: reporting.value },
+        context,
+        undefined,
+        reporting.redacted,
+      );
+    }
+    const classification = this.classify(settled.error);
+    const reason =
+      isTwiceshyError(settled.error) && settled.error.code === 'DOWNSTREAM_UNAVAILABLE'
+        ? 'downstream crashed'
+        : classification === 'definite'
+          ? 'definite failure'
+          : 'ambiguous error';
+    const outcome: ExecutionOutcome =
+      classification === 'definite' ? { type: 'definite-failure' } : { type: 'ambiguous-failure' };
+    return this.completeOutcome(
+      recordId,
+      outcome,
+      context,
+      safeErrorSummary({ error: settled.error, classification, reason }),
+    );
+  }
+
   /** Records an outcome; a failed write emits store-write-failed (C9 rule 3). */
-  private async recordCompletion(
+  private async completeOutcome(
     recordId: string,
     outcome: ExecutionOutcome,
     context: ExecuteContext,
-  ): Promise<boolean> {
+    errorSummary?: string,
+    resultRedacted?: boolean,
+  ): Promise<CompleteResult | null> {
     try {
-      await this.options.store.complete(recordId, {
+      return await this.options.store.complete(recordId, {
+        attemptToken: context.attemptToken,
         outcome,
         now: this.options.clock.now(),
         settings: context.settings,
         maxResultBytes: this.options.maxResultBytes,
         ...(context.storeResult === undefined ? {} : { storeResult: context.storeResult }),
+        ...(errorSummary === undefined ? {} : { errorSummary }),
+        ...(resultRedacted === undefined ? {} : { resultRedacted }),
       });
-      return true;
     } catch (error) {
       this.emit('store-write-failed', { ...context, recordId }, { error });
-      return false;
+      return null;
     }
   }
 
@@ -1100,6 +1207,22 @@ class DefaultGuard implements Guard {
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The safe audit description for a failed action (C20 rule 8): the error
+ * class name, the Twiceshy code, the classification, and a fixed reason. The
+ * raw error message is deliberately absent, so downstream text cannot reach
+ * the record.
+ */
+function safeErrorSummary(input: {
+  error?: unknown;
+  classification: 'definite' | 'ambiguous' | 'none';
+  reason: string;
+}): string {
+  const name = input.error instanceof Error ? input.error.name : 'none';
+  const code = isTwiceshyError(input.error) ? input.error.code : 'none';
+  return `${name} [${code}/${input.classification}]: ${input.reason}`;
 }
 
 /** Creates a guard; invalid options throw one CONFIG_INVALID listing them all. */

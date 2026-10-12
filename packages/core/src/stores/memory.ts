@@ -1,4 +1,4 @@
-import { afterExecution, decide, lateCompletion } from '../engine.js';
+import { completeRecord, decide } from '../engine.js';
 import { NotSerializableError, StoreUnavailableError } from '../errors.js';
 import { applyPatch, recordNotFound, toEngineRecord } from './record.js';
 import type {
@@ -7,6 +7,7 @@ import type {
   BeginInput,
   BeginResult,
   CompleteInput,
+  CompleteResult,
   ListFilter,
   RepeatGrant,
   Resolution,
@@ -27,6 +28,12 @@ function clone<T>(value: T): T {
 export class MemoryStore implements ActionStore {
   private readonly records = new Map<string, ActionRecord>();
   private sequence = 0;
+  private tokenSequence = 0;
+
+  private nextToken(): string {
+    this.tokenSequence += 1;
+    return `claim-${this.tokenSequence}`;
+  }
 
   async begin(input: BeginInput): Promise<BeginResult> {
     // Atomicity rule (C12): everything from the read on the next line to the
@@ -53,8 +60,10 @@ export class MemoryStore implements ActionStore {
           ...existing,
           state: 'IN_FLIGHT',
           attempt: decision.changes.attempt as number,
+          attemptToken: this.nextToken(),
           result: undefined,
           resultTruncated: false,
+          resultRedacted: false,
           startedAt: input.now,
           completedAt: null,
           leaseExpiresAt: decision.changes.leaseUntil as Date,
@@ -73,9 +82,11 @@ export class MemoryStore implements ActionStore {
         scope: input.scope,
         state: 'IN_FLIGHT',
         attempt: decision.changes.attempt as number,
+        attemptToken: this.nextToken(),
         redactedArgs: clone(input.redactedArgs),
         result: undefined,
         resultTruncated: false,
+        resultRedacted: false,
         errorSummary: null,
         createdAt: input.now,
         startedAt: input.now,
@@ -127,25 +138,40 @@ export class MemoryStore implements ActionStore {
     this.records.set(id, clone({ ...record, leaseExpiresAt: new Date(until.getTime()) }));
   }
 
-  async complete(id: string, input: CompleteInput): Promise<void> {
+  async complete(id: string, input: CompleteInput): Promise<CompleteResult> {
+    // Everything from here to the record write runs synchronously, so the
+    // conditional check and the write are one atomic operation (C12/C20).
     const record = this.records.get(id);
     if (record === undefined) {
       throw recordNotFound(id);
     }
-    if (record.state !== 'IN_FLIGHT' && record.state !== 'IN_DOUBT') {
-      // Never overwrite a terminal state set by another process or a human.
-      return;
+    const decision = completeRecord(
+      toEngineRecord(record),
+      { attemptToken: input.attemptToken, outcome: input.outcome },
+      input.now,
+      input.settings,
+    );
+    if (decision.path === 'changed' || decision.path === 'agrees-with-resolution') {
+      return { path: decision.path, written: false, record: clone(record) };
     }
-    const engineRecord = toEngineRecord(record);
-    const patch =
-      record.state === 'IN_FLIGHT'
-        ? afterExecution(engineRecord, input.outcome, input.now, input.settings)
-        : lateCompletion(engineRecord, input.outcome, input.now);
+    if (Object.keys(decision.patch).length === 0) {
+      return { path: decision.path, written: false, record: clone(record) };
+    }
+    const resultInPatch = 'result' in decision.patch;
     const updated: ActionRecord = {
-      ...applyPatch(record, patch),
+      ...applyPatch(record, decision.patch),
       errorSummary: input.errorSummary ?? record.errorSummary,
     };
+    if (resultInPatch) {
+      updated.resultTruncated = input.storeResult === false;
+      updated.resultRedacted =
+        input.storeResult === false ? false : (input.resultRedacted ?? false);
+      if (input.storeResult === false) {
+        updated.result = undefined;
+      }
+    }
     this.records.set(id, clone(updated));
+    return { path: decision.path, written: true, record: clone(updated) };
   }
 
   async get(id: string): Promise<ActionRecord | null> {

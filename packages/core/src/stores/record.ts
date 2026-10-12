@@ -1,14 +1,15 @@
-import type { EngineRecord, RecordPatch } from '../engine.js';
+import type { EngineClaimedRecord, RecordPatch } from '../engine.js';
 import { StoreUnavailableError } from '../errors.js';
 import type { ActionRecord } from './types.js';
 
 /** Maps a stored record onto the pure engine's view. */
-export function toEngineRecord(record: ActionRecord): EngineRecord {
+export function toEngineRecord(record: ActionRecord): EngineClaimedRecord {
   return {
     id: record.id,
     fingerprint: record.fingerprint,
     state: record.state,
     attempt: record.attempt,
+    attemptToken: record.attemptToken,
     leaseUntil: record.leaseExpiresAt,
     completedAt: record.completedAt,
     result: record.result,

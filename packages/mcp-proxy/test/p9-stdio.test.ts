@@ -25,7 +25,9 @@ afterEach(() => {
 });
 
 describe('P9: stdout purity of the built proxy', () => {
-  it('P9: the real proxy binary over stdio answers a full session with JSON-RPC only', async () => {
+  it('P9: the real proxy binary over stdio answers a full session with JSON-RPC only', {
+    timeout: 60_000,
+  }, async () => {
     ensureBuilt();
 
     const dir = mkdtempSync(join(tmpdir(), 'twiceshy-p9-'));

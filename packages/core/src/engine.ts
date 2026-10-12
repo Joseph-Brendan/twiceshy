@@ -87,7 +87,9 @@ export type ExecutionOutcome =
   | { type: 'success'; result: unknown }
   | { type: 'definite-failure' }
   | { type: 'ambiguous-failure' }
-  | { type: 'cancelled' };
+  | { type: 'cancelled' }
+  /** C20 rule 4: cancelled after the claim but before the tool was invoked. */
+  | { type: 'cancelled-before-start' };
 
 /**
  * The defensive never check. A stored record in a state this engine does not
@@ -217,6 +219,7 @@ export function afterExecution(
     case 'success':
       return { state: 'SUCCEEDED', completedAt: now, leaseUntil: null, result: outcome.result };
     case 'definite-failure':
+    case 'cancelled-before-start':
       return {
         state: 'FAILED_DEFINITE',
         completedAt: now,
@@ -252,6 +255,7 @@ export function lateCompletion(
     case 'success':
       return { state: 'SUCCEEDED', completedAt: now, leaseUntil: null, result: outcome.result };
     case 'definite-failure':
+    case 'cancelled-before-start':
       return {
         state: 'FAILED_DEFINITE',
         completedAt: now,
@@ -268,4 +272,75 @@ export function lateCompletion(
         record.id,
       );
   }
+}
+
+/** The record as a claim sees it: the attempt number plus its claim token. */
+export interface EngineClaimedRecord extends EngineRecord {
+  attemptToken: string;
+}
+
+/** What `complete()` did, decided by the pure rules in C20 rule 1. */
+export type CompletionPath =
+  | 'outcome'
+  | 'late-completion'
+  | 'agrees-with-resolution'
+  | 'resolution-conflict'
+  | 'changed';
+
+export interface CompletionDecision {
+  path: CompletionPath;
+  patch: RecordPatch;
+}
+
+export interface CompletionRequest {
+  /** The claim token returned by `begin`; only its owner may complete normally. */
+  attemptToken: string;
+  outcome: ExecutionOutcome;
+}
+
+/**
+ * The conditional completion rules from C20. A normal completion writes only
+ * when the record is still IN_FLIGHT and claimed by the same attempt token.
+ * Everything else is routed to the late-completion, human-resolution, or
+ * "record changed" path. Stores run this inside the same atomic operation
+ * that reads the record, so two processes can never both write.
+ */
+export function completeRecord(
+  record: EngineClaimedRecord,
+  request: CompletionRequest,
+  now: Date,
+  settings: EngineSettings,
+): CompletionDecision {
+  if (record.state === 'IN_FLIGHT') {
+    if (record.attemptToken !== request.attemptToken) {
+      return { path: 'changed', patch: {} };
+    }
+    return { path: 'outcome', patch: afterExecution(record, request.outcome, now, settings) };
+  }
+  if (record.state === 'IN_DOUBT') {
+    return { path: 'late-completion', patch: lateCompletion(record, request.outcome, now) };
+  }
+  if (record.state === 'RESOLVED_FAILED') {
+    if (
+      request.outcome.type === 'definite-failure' ||
+      request.outcome.type === 'cancelled-before-start'
+    ) {
+      return { path: 'agrees-with-resolution', patch: {} };
+    }
+    // The human said "failed" but the action may have happened after all.
+    // Block the next identical call with IN_DOUBT until a person decides
+    // again; the human's name and note stay on the record (C20 rule 3).
+    return { path: 'resolution-conflict', patch: { state: 'IN_DOUBT', leaseUntil: null } };
+  }
+  if (record.state === 'RESOLVED_SUCCEEDED') {
+    if (request.outcome.type === 'success') {
+      return { path: 'agrees-with-resolution', patch: {} };
+    }
+    // The next call is a duplicate anyway, so no state change is needed.
+    return { path: 'resolution-conflict', patch: {} };
+  }
+  if (record.state === 'SUCCEEDED' || record.state === 'FAILED_DEFINITE') {
+    return { path: 'changed', patch: {} };
+  }
+  return unhandledEngineValue('record state', record.state, record.id);
 }

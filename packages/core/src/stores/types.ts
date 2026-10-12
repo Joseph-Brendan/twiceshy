@@ -1,4 +1,4 @@
-import type { EngineSettings, ExecutionOutcome, RecordState } from '../engine.js';
+import type { CompletionPath, EngineSettings, ExecutionOutcome, RecordState } from '../engine.js';
 
 /** A human-approved repeat that has not been consumed yet. */
 export interface RepeatGrant {
@@ -19,12 +19,16 @@ export interface ActionRecord {
   scope: string;
   state: RecordState;
   attempt: number;
+  /** Opaque token for the current claim; `complete` checks it atomically (C20). */
+  attemptToken: string;
   /** Arguments after redaction. */
   redactedArgs: unknown;
   /** Stored result for successful terminal states. */
   result: unknown;
   /** True when the result was replaced with a summary because it was too large. */
   resultTruncated: boolean;
+  /** True when redaction replaced at least one field in the stored result (C20 rule 6). */
+  resultRedacted: boolean;
   /** Short human-readable summary of the failure or in-doubt reason. */
   errorSummary: string | null;
   createdAt: Date;
@@ -59,16 +63,33 @@ export type BeginResult =
   | { kind: 'reject-key-conflict'; record: ActionRecord };
 
 export interface CompleteInput {
+  /**
+   * The claim token returned by `begin`. A normal completion writes only when
+   * the record is still IN_FLIGHT and owned by this token (C20 rule 1).
+   */
+  attemptToken: string;
   outcome: ExecutionOutcome;
   /** Injected time. Terminal states always get completedAt set to this. */
   now: Date;
   settings: EngineSettings;
   /** Short human-readable summary stored for audit. */
   errorSummary?: string;
-  /** Store the full result (default true). False keeps a short summary only. */
+  /** Store the full result (default true). False keeps no result at all. */
   storeResult?: boolean;
+  /** True when redaction replaced at least one field of the result. */
+  resultRedacted?: boolean;
   /** Largest full result to store, in bytes. Default 256 KB. */
   maxResultBytes?: number;
+}
+
+/** What a `complete` call did (C20 rule 1). */
+export interface CompleteResult {
+  /** Which C20 path the store took. */
+  path: CompletionPath;
+  /** True when the stored record changed. */
+  written: boolean;
+  /** The record after the call, or null if it could not be read. */
+  record: ActionRecord | null;
 }
 
 /** Default limit for stored results (SPEC.md C9: 256 KB). */
@@ -99,7 +120,8 @@ export interface ActionStore {
   /** Atomic read-decide-claim. Uses the pure engine functions for the C6 table. */
   begin(input: BeginInput): Promise<BeginResult>;
   renewLease(id: string, until: Date): Promise<void>;
-  complete(id: string, input: CompleteInput): Promise<void>;
+  /** Atomic conditional completion (C20 rule 1). */
+  complete(id: string, input: CompleteInput): Promise<CompleteResult>;
   get(id: string): Promise<ActionRecord | null>;
   findByIdentity(identity: string): Promise<ActionRecord | null>;
   list(filter: ListFilter): Promise<ActionRecord[]>;

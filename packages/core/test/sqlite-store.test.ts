@@ -68,10 +68,11 @@ async function executeOnce(store: SqliteStore, fingerprint: string): Promise<Act
 }
 
 function completeInput(
+  record: ActionRecord,
   outcome: CompleteInput['outcome'],
   overrides: Partial<CompleteInput> = {},
 ): CompleteInput {
-  return { outcome, now: NOW, settings: SETTINGS, ...overrides };
+  return { attemptToken: record.attemptToken, outcome, now: NOW, settings: SETTINGS, ...overrides };
 }
 
 runStoreContract(
@@ -95,7 +96,10 @@ describe('SqliteStore opening', () => {
 
     const store = new SqliteStore({ path });
     const record = await executeOnce(store, 'fp-unicode-path');
-    await store.complete(record.id, completeInput({ type: 'success', result: { ok: true } }));
+    await store.complete(
+      record.id,
+      completeInput(record, { type: 'success', result: { ok: true } }),
+    );
     expect((await store.get(record.id))?.state).toBe('SUCCEEDED');
     await store.close();
 
@@ -192,7 +196,10 @@ describe('SqliteStore persistence', () => {
     const path = join(tempDir(), 'actions.db');
     const first = new SqliteStore({ path });
     const record = await executeOnce(first, 'fp-1');
-    await first.complete(record.id, completeInput({ type: 'success', result: { ok: true } }));
+    await first.complete(
+      record.id,
+      completeInput(record, { type: 'success', result: { ok: true } }),
+    );
     await first.close();
 
     const second = new SqliteStore({ path });
@@ -204,7 +211,7 @@ describe('SqliteStore persistence', () => {
     const row = raw.prepare('SELECT version FROM schema_version LIMIT 1').get() as {
       version: number;
     };
-    expect(row.version).toBe(1);
+    expect(row.version).toBe(2);
     raw.close();
     await second.close();
   });
@@ -234,14 +241,19 @@ describe('S3 schema migration', () => {
     const row = raw.prepare('SELECT version FROM schema_version LIMIT 1').get() as {
       version: number;
     };
-    expect(row.version).toBe(1);
+    expect(row.version).toBe(2);
     const columns = raw.prepare('PRAGMA table_info(actions)').all() as { name: string }[];
     expect(columns.map((column) => column.name)).toContain('repeat_grant');
+    expect(columns.map((column) => column.name)).toContain('attempt_token');
+    expect(columns.map((column) => column.name)).toContain('result_redacted');
     raw.close();
 
     // The migrated schema supports new writes and is fully usable.
     const record = await executeOnce(store, 'fp-new');
-    await store.complete(record.id, completeInput({ type: 'success', result: { ok: true } }));
+    await store.complete(
+      record.id,
+      completeInput(record, { type: 'success', result: { ok: true } }),
+    );
     expect((await store.get(record.id))?.state).toBe('SUCCEEDED');
     await store.close();
   });
@@ -262,7 +274,10 @@ describe('S6 redaction on disk', () => {
     const result = await store.begin(beginInput(redacted, { fingerprint: 'fp-secrets' }));
     if (result.kind !== 'execute') throw new Error('expected execute');
     const record = result.record;
-    await store.complete(record.id, completeInput({ type: 'success', result: { receipt: 'R1' } }));
+    await store.complete(
+      record.id,
+      completeInput(record, { type: 'success', result: { receipt: 'R1' } }),
+    );
 
     const stored = await store.get(record.id);
     if (stored === null) throw new Error('expected a stored record');
@@ -289,7 +304,7 @@ describe('S8 result size policy', () => {
     const atLimit = await executeOnce(store, 'fp-at-limit');
     await store.complete(
       atLimit.id,
-      completeInput({ type: 'success', result: small }, { maxResultBytes: 12 }),
+      completeInput(atLimit, { type: 'success', result: small }, { maxResultBytes: 12 }),
     );
     const storedFull = await store.get(atLimit.id);
     expect(storedFull?.result).toBe(small);
@@ -301,7 +316,7 @@ describe('S8 result size policy', () => {
     try {
       await store.complete(
         overLimit.id,
-        completeInput({ type: 'success', result: small }, { maxResultBytes: 11 }),
+        completeInput(overLimit, { type: 'success', result: small }, { maxResultBytes: 11 }),
       );
     } catch (error) {
       caught = error;
@@ -318,11 +333,11 @@ describe('S8 result size policy', () => {
     // The caller can recover by not storing the full result: a summary is kept.
     await store.complete(
       overLimit.id,
-      completeInput({ type: 'success', result: small }, { storeResult: false }),
+      completeInput(overLimit, { type: 'success', result: small }, { storeResult: false }),
     );
     const summarised = await store.get(overLimit.id);
     expect(summarised?.state).toBe('SUCCEEDED');
-    expect(summarised?.result).toBe('[result not stored: 12 bytes]');
+    expect(summarised?.result).toBeUndefined();
     expect(summarised?.resultTruncated).toBe(true);
     await store.close();
   });
@@ -347,7 +362,7 @@ describe('SqliteStore JSON storage', () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;
     await expect(
-      store.complete(record.id, completeInput({ type: 'success', result: circular })),
+      store.complete(record.id, completeInput(record, { type: 'success', result: circular })),
     ).rejects.toBeInstanceOf(NotSerializableError);
     expect((await store.get(record.id))?.state).toBe('IN_FLIGHT');
     await store.close();

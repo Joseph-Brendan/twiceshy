@@ -37,13 +37,18 @@ function beginInput(overrides: Partial<BeginInput> = {}): BeginInput {
 }
 
 function completeInput(
+  record: ActionRecord,
   outcome: CompleteInput['outcome'],
   now: Date,
   errorSummary?: string,
 ): CompleteInput {
-  return errorSummary === undefined
-    ? { outcome, now, settings: SETTINGS }
-    : { outcome, now, settings: SETTINGS, errorSummary };
+  return {
+    attemptToken: record.attemptToken,
+    outcome,
+    now,
+    settings: SETTINGS,
+    ...(errorSummary === undefined ? {} : { errorSummary }),
+  };
 }
 
 function execute(result: BeginResult): Extract<BeginResult, { kind: 'execute' }> {
@@ -94,14 +99,17 @@ export function runStoreContract(
     ): Promise<ActionRecord> {
       const input = beginInput(overrides);
       const record = execute(await store.begin(input)).record;
-      await store.complete(record.id, completeInput(outcome, input.now));
+      await store.complete(record.id, completeInput(record, outcome, input.now));
       return requireRecord(await store.get(record.id));
     }
 
     async function createInDoubt(overrides: Partial<BeginInput> = {}): Promise<ActionRecord> {
       const input = beginInput(overrides);
       const record = execute(await store.begin(input)).record;
-      await store.complete(record.id, completeInput({ type: 'ambiguous-failure' }, input.now));
+      await store.complete(
+        record.id,
+        completeInput(record, { type: 'ambiguous-failure' }, input.now),
+      );
       return requireRecord(await store.get(record.id));
     }
 
@@ -138,7 +146,7 @@ export function runStoreContract(
         const first = execute(await store.begin(beginInput())).record;
         await store.complete(
           first.id,
-          completeInput({ type: 'success', result: { receipt: 'R1' } }, NOW),
+          completeInput(first, { type: 'success', result: { receipt: 'R1' } }, NOW),
         );
         const second = duplicateResult(await store.begin(beginInput({ now: offset(MINUTE) })));
         expect(second.originalResult).toEqual({ receipt: 'R1' });
@@ -150,7 +158,7 @@ export function runStoreContract(
         const first = execute(await store.begin(beginInput())).record;
         await store.complete(
           first.id,
-          completeInput({ type: 'success', result: { ok: true } }, NOW),
+          completeInput(first, { type: 'success', result: { ok: true } }, NOW),
         );
         const result = execute(
           await store.begin(beginInput({ now: offset(SETTINGS.windowMs + 1) })),
@@ -173,7 +181,7 @@ export function runStoreContract(
 
       it('executes again after a definite failure, incrementing the attempt', async () => {
         const first = execute(await store.begin(beginInput())).record;
-        await store.complete(first.id, completeInput({ type: 'definite-failure' }, NOW));
+        await store.complete(first.id, completeInput(first, { type: 'definite-failure' }, NOW));
         const result = execute(await store.begin(beginInput({ now: offset(MINUTE) })));
         expect(result.record.id).toBe(first.id);
         expect(result.record.attempt).toBe(2);
@@ -245,7 +253,7 @@ export function runStoreContract(
         const first = execute(await store.begin(beginInput({ explicitKey: 'order-1' }))).record;
         await store.complete(
           first.id,
-          completeInput({ type: 'success', result: { ok: true } }, NOW),
+          completeInput(first, { type: 'success', result: { ok: true } }, NOW),
         );
         const result = await store.begin(
           beginInput({ explicitKey: 'order-1', now: offset(MINUTE) }),
@@ -281,7 +289,12 @@ export function runStoreContract(
         const first = execute(await store.begin(beginInput())).record;
         await store.complete(
           first.id,
-          completeInput({ type: 'success', result: { receipt: 'R1' } }, offset(MINUTE), 'all good'),
+          completeInput(
+            first,
+            { type: 'success', result: { receipt: 'R1' } },
+            offset(MINUTE),
+            'all good',
+          ),
         );
         const stored = requireRecord(await store.get(first.id));
         expect(stored.state).toBe('SUCCEEDED');
@@ -295,7 +308,7 @@ export function runStoreContract(
         const first = execute(await store.begin(beginInput())).record;
         await store.complete(
           first.id,
-          completeInput({ type: 'definite-failure' }, offset(MINUTE), 'invalid params'),
+          completeInput(first, { type: 'definite-failure' }, offset(MINUTE), 'invalid params'),
         );
         const stored = requireRecord(await store.get(first.id));
         expect(stored.state).toBe('FAILED_DEFINITE');
@@ -308,7 +321,7 @@ export function runStoreContract(
         const first = execute(await store.begin(beginInput())).record;
         await store.complete(
           first.id,
-          completeInput({ type: 'ambiguous-failure' }, offset(MINUTE)),
+          completeInput(first, { type: 'ambiguous-failure' }, offset(MINUTE)),
         );
         const stored = requireRecord(await store.get(first.id));
         expect(stored.state).toBe('IN_DOUBT');
@@ -318,7 +331,7 @@ export function runStoreContract(
 
       it('marks a cancelled action IN_DOUBT', async () => {
         const first = execute(await store.begin(beginInput())).record;
-        await store.complete(first.id, completeInput({ type: 'cancelled' }, offset(MINUTE)));
+        await store.complete(first.id, completeInput(first, { type: 'cancelled' }, offset(MINUTE)));
         expect(requireRecord(await store.get(first.id)).state).toBe('IN_DOUBT');
       });
 
@@ -330,7 +343,7 @@ export function runStoreContract(
         expect(blocked.kind).toBe('block-in-doubt');
         await store.complete(
           first.id,
-          completeInput({ type: 'success', result: { receipt: 'late' } }, offset(MINUTE)),
+          completeInput(first, { type: 'success', result: { receipt: 'late' } }, offset(MINUTE)),
         );
         const stored = requireRecord(await store.get(first.id));
         expect(stored.state).toBe('SUCCEEDED');
@@ -338,23 +351,91 @@ export function runStoreContract(
         expect(stored.result).toEqual({ receipt: 'late' });
       });
 
-      it('never overwrites a human resolution', async () => {
+      it('C20.3: a late success against a human "failed" decision reports a conflict and blocks with IN_DOUBT', async () => {
+        const first = await createInDoubt();
+        await store.resolve(first.id, {
+          as: 'failed',
+          by: 'kola',
+          note: 'nothing on the dashboard',
+          at: offset(MINUTE),
+        });
+        const result = await store.complete(
+          first.id,
+          completeInput(first, { type: 'success', result: { receipt: 'R1' } }, offset(2 * MINUTE)),
+        );
+        expect(result.path).toBe('resolution-conflict');
+        expect(result.written).toBe(true);
+        const stored = requireRecord(await store.get(first.id));
+        expect(stored.state).toBe('IN_DOUBT');
+        expect(stored.result).toBeUndefined();
+        // The human's decision stays on the record for audit.
+        expect(stored.resolvedBy).toBe('kola');
+        expect(stored.resolutionNote).toBe('nothing on the dashboard');
+        const blocked = await store.begin(beginInput());
+        expect(blocked.kind).toBe('block-in-doubt');
+      });
+
+      it('C20.1: complete refuses a write from anything but the claiming attempt token', async () => {
+        const first = execute(await store.begin(beginInput())).record;
+        const stale = await store.complete(first.id, {
+          ...completeInput(first, { type: 'success', result: 'late' }, NOW),
+          attemptToken: 'not-the-owner',
+        });
+        expect(stale.path).toBe('changed');
+        expect(stale.written).toBe(false);
+        const stored = requireRecord(await store.get(first.id));
+        expect(stored.state).toBe('IN_FLIGHT');
+        expect(stored.result).toBeUndefined();
+      });
+
+      it('C20.1: a stale completion leaves a newer attempt alone', async () => {
+        const first = execute(await store.begin(beginInput())).record;
+        await store.complete(first.id, completeInput(first, { type: 'definite-failure' }, NOW));
+        const second = execute(await store.begin(beginInput({ now: offset(MINUTE) }))).record;
+        expect(second.attempt).toBe(2);
+        expect(second.attemptToken).not.toBe(first.attemptToken);
+        const stale = await store.complete(
+          first.id,
+          completeInput(first, { type: 'success', result: 'stale' }, offset(2 * MINUTE)),
+        );
+        expect(stale.path).toBe('changed');
+        const stored = requireRecord(await store.get(first.id));
+        expect(stored.state).toBe('IN_FLIGHT');
+        expect(stored.attempt).toBe(2);
+        expect(stored.result).toBeUndefined();
+      });
+
+      it('C20.3: a result that agrees with the human resolution changes nothing', async () => {
         const first = await createInDoubt();
         await store.resolve(first.id, { as: 'failed', by: 'kola', at: offset(MINUTE) });
-        await store.complete(
+        const result = await store.complete(
           first.id,
-          completeInput({ type: 'success', result: { receipt: 'R1' } }, offset(2 * MINUTE)),
+          completeInput(first, { type: 'definite-failure' }, offset(2 * MINUTE)),
         );
+        expect(result.path).toBe('agrees-with-resolution');
+        expect(result.written).toBe(false);
+        expect(requireRecord(await store.get(first.id)).state).toBe('RESOLVED_FAILED');
+      });
+
+      it('C20.6: storeResult false stores no result at all', async () => {
+        const first = execute(await store.begin(beginInput())).record;
+        await store.complete(first.id, {
+          ...completeInput(first, { type: 'success', result: { token: 'x' } }, NOW),
+          storeResult: false,
+        });
         const stored = requireRecord(await store.get(first.id));
-        expect(stored.state).toBe('RESOLVED_FAILED');
+        expect(stored.state).toBe('SUCCEEDED');
         expect(stored.result).toBeUndefined();
+        expect(stored.resultTruncated).toBe(true);
+        const duplicate = duplicateResult(await store.begin(beginInput({ now: offset(MINUTE) })));
+        expect(duplicate.originalResult).toBeUndefined();
       });
 
       it('does not overwrite an already successful record', async () => {
         const first = await createCompleted({}, { type: 'success', result: 'first' });
         await store.complete(
           first.id,
-          completeInput({ type: 'success', result: 'second' }, offset(MINUTE)),
+          completeInput(first, { type: 'success', result: 'second' }, offset(MINUTE)),
         );
         const stored = requireRecord(await store.get(first.id));
         expect(stored.result).toBe('first');
@@ -363,7 +444,12 @@ export function runStoreContract(
 
       it('throws STORE_UNAVAILABLE for an unknown record id', async () => {
         await expect(
-          store.complete('missing', completeInput({ type: 'success', result: 1 }, NOW)),
+          store.complete('missing', {
+            attemptToken: 'missing',
+            outcome: { type: 'success', result: 1 },
+            now: NOW,
+            settings: SETTINGS,
+          }),
         ).rejects.toMatchObject({ code: 'STORE_UNAVAILABLE' });
       });
     });
@@ -543,7 +629,11 @@ export function runStoreContract(
         expect(repeated.record.attempt).toBe(2);
         await store.complete(
           repeated.record.id,
-          completeInput({ type: 'success', result: { ok: true } }, offset(2 * MINUTE)),
+          completeInput(
+            repeated.record,
+            { type: 'success', result: { ok: true } },
+            offset(2 * MINUTE),
+          ),
         );
         const after = await store.begin(beginInput({ now: offset(3 * MINUTE) }));
         expect(after.kind).toBe('duplicate');
@@ -558,7 +648,11 @@ export function runStoreContract(
         expect(fresh.record.repeatGrant).toBeNull();
         await store.complete(
           fresh.record.id,
-          completeInput({ type: 'success', result: { ok: true } }, offset(SETTINGS.windowMs + 2)),
+          completeInput(
+            fresh.record,
+            { type: 'success', result: { ok: true } },
+            offset(SETTINGS.windowMs + 2),
+          ),
         );
         const after = await store.begin(beginInput({ now: offset(SETTINGS.windowMs + 3) }));
         expect(after.kind).toBe('duplicate');
@@ -637,7 +731,7 @@ export function runStoreContract(
         const first = execute(await store.begin(beginInput())).record;
         await store.complete(
           first.id,
-          completeInput({ type: 'success', result: { nested: { amount: 1500 } } }, NOW),
+          completeInput(first, { type: 'success', result: { nested: { amount: 1500 } } }, NOW),
         );
         const returned = requireRecord(await store.get(first.id));
         returned.state = 'FAILED_DEFINITE';
@@ -669,7 +763,7 @@ export function runStoreContract(
       it('stores a copy of a result the caller passes in', async () => {
         const first = execute(await store.begin(beginInput())).record;
         const result = { nested: { total: 1500 } };
-        await store.complete(first.id, completeInput({ type: 'success', result }, NOW));
+        await store.complete(first.id, completeInput(first, { type: 'success', result }, NOW));
         result.nested.total = 0;
         const stored = requireRecord(await store.get(first.id));
         expect(stored.result).toEqual({ nested: { total: 1500 } });

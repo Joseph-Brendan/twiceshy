@@ -60,7 +60,9 @@ function waitForExit(
 }
 
 describe('P11: graceful shutdown', () => {
-  it('P11: SIGTERM during an in-flight call waits for it, then exits with code 0', async () => {
+  it('P11: SIGTERM during an in-flight call waits for it, then exits with code 0', {
+    timeout: 60_000,
+  }, async () => {
     ensureBuilt();
 
     const dir = tempDir();

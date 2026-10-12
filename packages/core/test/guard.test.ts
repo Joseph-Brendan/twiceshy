@@ -9,6 +9,7 @@ import type {
   BeginInput,
   BeginResult,
   CompleteInput,
+  CompleteResult,
   CreateGuardOptions,
   Guard,
   GuardEvent,
@@ -81,7 +82,7 @@ class UnavailableStore extends MemoryStore {
 }
 
 class WriteFailStore extends MemoryStore {
-  override async complete(_id: string, _input: CompleteInput): Promise<void> {
+  override async complete(_id: string, _input: CompleteInput): Promise<CompleteResult> {
     throw new StoreUnavailableError({});
   }
 }
@@ -107,6 +108,23 @@ function failingRenewStore(inner: ActionStore): ActionStore {
     },
     complete: (id, input) => inner.complete(id, input),
     get: (id) => inner.get(id),
+    findByIdentity: (identity) => inner.findByIdentity(identity),
+    list: (filter) => inner.list(filter),
+    resolve: (id, resolution) => inner.resolve(id, resolution),
+    grantRepeat: (fingerprint, grant) => inner.grantRepeat(fingerprint, grant),
+    purge: (olderThan) => inner.purge(olderThan),
+    close: () => inner.close(),
+  };
+}
+
+function readFailingStore(inner: ActionStore): ActionStore {
+  return {
+    begin: (input) => inner.begin(input),
+    renewLease: (id, until) => inner.renewLease(id, until),
+    complete: (id, input) => inner.complete(id, input),
+    get: async () => {
+      throw new StoreUnavailableError({});
+    },
     findByIdentity: (identity) => inner.findByIdentity(identity),
     list: (filter) => inner.list(filter),
     resolve: (id, resolution) => inner.resolve(id, resolution),
@@ -273,6 +291,7 @@ describe.each(STORE_CASES)('guard with $name', ({ createStore }) => {
     const [record] = await guard.list({});
     // Simulate another caller seeing the lease expire and marking it IN_DOUBT.
     await store.complete(record?.id as string, {
+      attemptToken: record?.attemptToken as string,
       outcome: { type: 'ambiguous-failure' },
       now: clock.now(),
       settings: { windowMs: 600_000, waitForInFlightMs: 5_000, leaseMs: 90_000 },
@@ -298,6 +317,7 @@ describe.each(STORE_CASES)('guard with $name', ({ createStore }) => {
     await flushAsync();
     const [record] = await guard.list({});
     await store.complete(record?.id as string, {
+      attemptToken: record?.attemptToken as string,
       outcome: { type: 'ambiguous-failure' },
       now: clock.now(),
       settings: { windowMs: 600_000, waitForInFlightMs: 5_000, leaseMs: 90_000 },
@@ -338,13 +358,13 @@ describe.each(STORE_CASES)('guard with $name', ({ createStore }) => {
     expect(stored?.result).not.toBe('late answer nobody should store');
   });
 
-  it('a resolution made while the action runs is never overwritten', async () => {
+  it('a resolution made while the action runs is never overwritten silently', async () => {
     const store = createStore();
     const clock = makeClock();
-    const events: GuardEvent[] = [];
+    const conflicts: GuardEvent[] = [];
     const guard = makeGuard(store, clock, {
       timeoutMs: 60_000,
-      hooks: { onExecute: (event) => events.push(event) },
+      hooks: { onResolutionConflict: (event) => conflicts.push(event) },
     });
 
     const running = controlled<string>();
@@ -358,12 +378,13 @@ describe.each(STORE_CASES)('guard with $name', ({ createStore }) => {
     expect(outcome.status).toBe('executed');
     expect(outcome.value).toBe('the tool did act');
     const stored = await guard.get(record?.id as string);
-    expect(stored?.state).toBe('RESOLVED_FAILED');
+    expect(stored?.state).toBe('IN_DOUBT');
+    expect(stored?.resolvedBy).toBe('kola');
     expect(stored?.result).toBeUndefined();
-    expect(events[0]?.reason).toBe('record already RESOLVED_FAILED');
+    expect(conflicts[0]?.type).toBe('resolution-conflict');
   });
 
-  it('cancellation with an already-aborted signal leaves the record IN_DOUBT', async () => {
+  it('cancellation before the tool was invoked records FAILED_DEFINITE with a safe reason', async () => {
     const store = createStore();
     const clock = makeClock();
     const guard = makeGuard(store, clock, { timeoutMs: 60_000 });
@@ -373,7 +394,8 @@ describe.each(STORE_CASES)('guard with $name', ({ createStore }) => {
       guard.run({ tool: 'pay.tool', args: {}, signal: controller.signal }, async () => 'never'),
     ).rejects.toBeInstanceOf(InDoubtError);
     const [record] = await guard.list({});
-    expect(record?.state).toBe('IN_DOUBT');
+    expect(record?.state).toBe('FAILED_DEFINITE');
+    expect(record?.errorSummary).toContain('cancelled before start');
   });
 
   it('D6: resolve as succeeded makes the next call a duplicate, and resolve as failed lets it execute', async () => {
@@ -513,7 +535,9 @@ describe.each(STORE_CASES)('guard with $name', ({ createStore }) => {
     }
     expect(caught).toBe(ambiguous);
     const [inDoubt] = await guard.list({ state: 'IN_DOUBT' });
-    expect(inDoubt?.errorSummary).toBeNull();
+    // C20 rule 8: a safe summary is recorded, never the raw message.
+    expect(inDoubt?.errorSummary).toBe('Error [none/ambiguous]: ambiguous error');
+    expect(inDoubt?.errorSummary).not.toContain('socket hang up');
 
     const definite = definiteFailure(new Error('invalid params'));
     let caughtDefinite: unknown;
@@ -916,5 +940,302 @@ describe('createGuard options', () => {
     expectTypeOf(wrapped).parameters.toEqualTypeOf<[args: RefundArgs]>();
     expectTypeOf(wrapped).returns.toEqualTypeOf<Promise<{ receipt: string }>>();
     expectTypeOf(wrapped).toEqualTypeOf<typeof refund>();
+  });
+});
+
+const C20_SETTINGS = { windowMs: 600_000, waitForInFlightMs: 5_000, leaseMs: 90_000 };
+
+describe.each(STORE_CASES)('C20 amendments with $name', ({ createStore }) => {
+  it('C20.1: a late result upgrades an IN_DOUBT record through late completion even when the re-read failed', async () => {
+    const inner = createStore();
+    const store = readFailingStore(inner);
+    const clock = makeClock();
+    const lateEvents: GuardEvent[] = [];
+    const guard = makeGuard(store, clock, {
+      timeoutMs: 60_000,
+      hooks: { onLateCompletion: (event) => lateEvents.push(event) },
+    });
+
+    const running = controlled<string>();
+    const call = guard.run({ tool: 'slow.payment', args: { amount: 10 } }, () => running.promise);
+    await flushAsync();
+    const [record] = await inner.list({});
+    const recordId = record?.id as string;
+    // Another process sees the expired lease and marks the record in doubt.
+    await inner.complete(recordId, {
+      attemptToken: record?.attemptToken as string,
+      outcome: { type: 'ambiguous-failure' },
+      now: clock.now(),
+      settings: C20_SETTINGS,
+    });
+    expect((await inner.get(recordId))?.state).toBe('IN_DOUBT');
+
+    running.resolve('late receipt');
+    const outcome = await call;
+    expect(outcome.status).toBe('executed');
+    expect(outcome.value).toBe('late receipt');
+    await until(() => lateEvents.length > 0);
+    const stored = await inner.get(recordId);
+    expect(stored?.state).toBe('SUCCEEDED');
+    expect(stored?.result).toBe('late receipt');
+    expect(lateEvents[0]?.type).toBe('late-completion');
+  });
+
+  it('C20.1: a late completion never overwrites a newer attempt claimed by another process', async () => {
+    const inner = createStore();
+    const clock = makeClock();
+    const guard = makeGuard(inner, clock, { timeoutMs: 60_000 });
+
+    const running = controlled<string>();
+    const call = guard.run({ tool: 'slow.payment', args: { amount: 11 } }, () => running.promise);
+    await flushAsync();
+    const [record] = await inner.list({});
+    const recordId = record?.id as string;
+    await inner.complete(recordId, {
+      attemptToken: record?.attemptToken as string,
+      outcome: { type: 'ambiguous-failure' },
+      now: clock.now(),
+      settings: C20_SETTINGS,
+    });
+    await inner.resolve(recordId, { as: 'failed', by: 'kola', at: clock.now() });
+    const second = await inner.begin({
+      fingerprint: record?.fingerprint as string,
+      explicitKey: null,
+      serverId: record?.serverId as string,
+      toolName: record?.toolName as string,
+      scope: record?.scope as string,
+      redactedArgs: record?.redactedArgs,
+      now: clock.now(),
+      settings: C20_SETTINGS,
+    });
+    expect(second.kind).toBe('execute');
+
+    running.resolve('original result');
+    const outcome = await call;
+    expect(outcome.status).toBe('executed');
+    expect(outcome.value).toBe('original result');
+    const stored = await inner.get(recordId);
+    expect(stored?.state).toBe('IN_FLIGHT');
+    expect(stored?.attempt).toBe(2);
+    expect(stored?.result).toBeUndefined();
+  });
+
+  it('C20.3: a late success against a human "failed" resolution emits resolution-conflict and blocks the retry', async () => {
+    const store = createStore();
+    const clock = makeClock();
+    const conflicts: GuardEvent[] = [];
+    const guard = makeGuard(store, clock, {
+      timeoutMs: 1_000,
+      hooks: { onResolutionConflict: (event) => conflicts.push(event) },
+    });
+
+    const running = controlled<string>();
+    const call = guard.run(
+      { tool: 'paystack.refund', args: { amount: 1500 } },
+      () => running.promise,
+    );
+    await flushAsync();
+    const rejection = expect(call).rejects.toBeInstanceOf(InDoubtError);
+    await clock.advance(1_000);
+    await rejection;
+
+    const [record] = await guard.list({ state: 'IN_DOUBT' });
+    const recordId = record?.id as string;
+    await guard.resolve(recordId, { as: 'failed', by: 'kola', note: 'dashboard showed nothing' });
+
+    // The tool had actually succeeded; the late result now contradicts the
+    // human decision and must not pass silently.
+    running.resolve('refund receipt R-77');
+    await until(() => conflicts.length > 0);
+    expect(conflicts[0]?.type).toBe('resolution-conflict');
+    expect(conflicts[0]?.recordId).toBe(recordId);
+
+    const stored = await guard.get(recordId);
+    expect(stored?.state).toBe('IN_DOUBT');
+    expect(stored?.resolvedBy).toBe('kola');
+    expect(stored?.resolutionNote).toBe('dashboard showed nothing');
+    expect(stored?.result).toBeUndefined();
+
+    // The next identical call is blocked with IN_DOUBT until a person decides.
+    let ran = false;
+    await expect(
+      guard.run({ tool: 'paystack.refund', args: { amount: 1500 } }, async () => {
+        ran = true;
+        return 'second refund';
+      }),
+    ).rejects.toBeInstanceOf(InDoubtError);
+    expect(ran).toBe(false);
+  });
+
+  it('C20.4: cancellation before the tool function is invoked records FAILED_DEFINITE with "cancelled before start"', async () => {
+    const store = createStore();
+    const clock = makeClock();
+    const guard = makeGuard(store, clock, { timeoutMs: 60_000 });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      guard.run({ tool: 'pay.tool', args: {}, signal: controller.signal }, async () => 'never'),
+    ).rejects.toBeInstanceOf(InDoubtError);
+
+    const [record] = await guard.list({});
+    expect(record?.state).toBe('FAILED_DEFINITE');
+    expect(record?.errorSummary).toContain('cancelled before start');
+
+    // A definite failure is safe to retry, so the next call executes.
+    const outcome = await guard.run({ tool: 'pay.tool', args: {} }, async () => 'ran');
+    expect(outcome.status).toBe('executed');
+    expect(outcome.value).toBe('ran');
+  });
+
+  it('C20.4: cancellation after the tool was invoked stays IN_DOUBT', async () => {
+    const store = createStore();
+    const clock = makeClock();
+    const guard = makeGuard(store, clock, { timeoutMs: 60_000 });
+    const controller = new AbortController();
+    const running = controlled<string>();
+    let invoked = false;
+    const call = guard.run({ tool: 'pay.tool', args: {}, signal: controller.signal }, () => {
+      invoked = true;
+      return running.promise;
+    });
+    await flushAsync();
+    expect(invoked).toBe(true);
+    const rejection = expect(call).rejects.toBeInstanceOf(InDoubtError);
+    controller.abort();
+    await rejection;
+
+    const [record] = await guard.list({});
+    expect(record?.state).toBe('IN_DOUBT');
+  });
+
+  it('a late ambiguous failure after a timeout adds no late event and leaves the record in doubt', async () => {
+    const store = createStore();
+    const clock = makeClock();
+    const lateEvents: GuardEvent[] = [];
+    const guard = makeGuard(store, clock, {
+      timeoutMs: 1_000,
+      hooks: { onLateCompletion: (event) => lateEvents.push(event) },
+    });
+
+    const running = controlled<string>();
+    const call = guard.run({ tool: 'slow.late-ambiguous', args: {} }, () => running.promise);
+    await flushAsync();
+    const rejection = expect(call).rejects.toBeInstanceOf(InDoubtError);
+    await clock.advance(1_000);
+    await rejection;
+
+    running.reject(new Error('the provider never answered'));
+    for (let flush = 0; flush < 5; flush += 1) {
+      await flushAsync();
+    }
+    expect(lateEvents).toHaveLength(0);
+    const [record] = await guard.list({ state: 'IN_DOUBT' });
+    expect(record?.state).toBe('IN_DOUBT');
+  });
+});
+
+class ScriptedCompletionStore extends MemoryStore {
+  private readonly script: CompleteResult[] = [];
+
+  push(result: CompleteResult): void {
+    this.script.push(result);
+  }
+
+  override async complete(id: string, input: CompleteInput): Promise<CompleteResult> {
+    const next = this.script.shift();
+    return next ?? super.complete(id, input);
+  }
+}
+
+describe('guard completion paths with a store that returns no record', () => {
+  it('still reports the local result and the matching events', async () => {
+    const clock = makeClock();
+    const store = new ScriptedCompletionStore();
+    const lateEvents: GuardEvent[] = [];
+    const conflicts: GuardEvent[] = [];
+    const executes: GuardEvent[] = [];
+    const guard = makeGuard(store, clock, {
+      timeoutMs: 60_000,
+      hooks: {
+        onLateCompletion: (event) => lateEvents.push(event),
+        onResolutionConflict: (event) => conflicts.push(event),
+        onExecute: (event) => executes.push(event),
+      },
+    });
+
+    store.push({ path: 'late-completion', written: true, record: null });
+    const late = await guard.run({ tool: 't.late', args: { i: 1 } }, async () => 'late-value');
+    expect(late.value).toBe('late-value');
+    expect(lateEvents).toHaveLength(1);
+    expect(lateEvents[0]?.attempt).toBe(1);
+
+    store.push({ path: 'resolution-conflict', written: true, record: null });
+    const conflict = await guard.run(
+      { tool: 't.conflict', args: { i: 2 } },
+      async () => 'conflict-value',
+    );
+    expect(conflict.value).toBe('conflict-value');
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]?.attempt).toBe(1);
+
+    store.push({ path: 'changed', written: false, record: null });
+    const changed = await guard.run({ tool: 't.changed', args: { i: 3 } }, async () => 'x');
+    expect(changed.value).toBe('x');
+    expect(executes.at(-1)?.reason).toBe('record already unknown');
+    expect(executes.at(-1)?.attempt).toBe(1);
+
+    store.push({ path: 'outcome', written: true, record: null });
+    const outcome = await guard.run({ tool: 't.outcome', args: { i: 4 } }, async () => 'y');
+    expect(outcome.value).toBe('y');
+    expect(executes.at(-1)?.reason).toBe('success');
+  });
+
+  it('reports late and conflicting results from the late watcher without a stored record', async () => {
+    const clock = makeClock();
+    const store = new ScriptedCompletionStore();
+    const lateEvents: GuardEvent[] = [];
+    const conflicts: GuardEvent[] = [];
+    const guard = makeGuard(store, clock, {
+      timeoutMs: 1_000,
+      hooks: {
+        onLateCompletion: (event) => lateEvents.push(event),
+        onResolutionConflict: (event) => conflicts.push(event),
+      },
+    });
+
+    const first = controlled<string>();
+    const call = guard.run({ tool: 'slow.late', args: {} }, () => first.promise);
+    await flushAsync();
+    store.push({ path: 'outcome', written: true, record: null });
+    const rejection = expect(call).rejects.toBeInstanceOf(InDoubtError);
+    await clock.advance(1_000);
+    await rejection;
+    store.push({ path: 'late-completion', written: true, record: null });
+    first.resolve('late value');
+    await until(() => lateEvents.length > 0);
+    expect(lateEvents[0]?.attempt).toBe(1);
+
+    const second = controlled<string>();
+    const call2 = guard.run({ tool: 'slow.conflict', args: {} }, () => second.promise);
+    await flushAsync();
+    store.push({ path: 'outcome', written: true, record: null });
+    const rejection2 = expect(call2).rejects.toBeInstanceOf(InDoubtError);
+    await clock.advance(1_000);
+    await rejection2;
+    store.push({ path: 'resolution-conflict', written: true, record: null });
+    second.resolve('late success');
+    await until(() => conflicts.length > 0);
+    expect(conflicts[0]?.attempt).toBe(1);
+  });
+
+  it('a failed re-read combined with a failed write still returns the tool result', async () => {
+    const clock = makeClock();
+    const guard = makeGuard(readFailingStore(new WriteFailStore()), clock, {
+      timeoutMs: 60_000,
+    });
+    const outcome = await guard.run({ tool: 'pay.tool', args: {} }, async () => 'paid');
+    expect(outcome.status).toBe('executed');
+    expect(outcome.value).toBe('paid');
   });
 });
