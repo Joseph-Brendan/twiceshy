@@ -75,3 +75,17 @@ Installed: `@modelcontextprotocol/client@2.3.1`, `@modelcontextprotocol/server@2
 
 **Annotations and `_meta`.** `Tool.annotations` and `Tool._meta` flow through `tools/list` untouched; `CallToolResult._meta` is the result envelope (`ResultMetaObject`). The 2026-07-28 era attaches a reserved request `_meta` envelope automatically, and user `_meta` keys win.
 
+
+## C20 review fixes (Phase 6.2, second pass)
+
+Decisions taken while implementing the C20 amendments:
+
+- **Attempt tokens.** Each `begin` claim now carries an opaque `attemptToken`; `complete()` writes only when the record is still `IN_FLIGHT` and the token matches, and the check runs inside the same store transaction (`completeRecord` in `engine.ts`). The token is a stored column (`attempt_token`, migration version 2) rather than a derived attempt number, so a store cannot accidentally accept a stale writer.
+- **Resolution conflicts.** `completeRecord` treats a late success against `RESOLVED_FAILED` (or any late result that is not a definite failure) as a conflict: the human fields stay, the state returns to `IN_DOUBT`, and the guard emits `resolution-conflict`. A late success against `RESOLVED_SUCCEEDED` reports the conflict without a state change, because the next call is a duplicate anyway.
+- **Cancelled before start.** A new `cancelled-before-start` outcome maps to `FAILED_DEFINITE`; the guard uses it only when the signal was already aborted before `startCall`, so the tool function genuinely never ran. Cancellation after invocation still records `IN_DOUBT`.
+- **Result redaction.** `redactReporting` returns the redacted copy plus a flag; the guard redacts successful results before `complete`. Records carry `resultRedacted`, and the proxy puts it in `_meta`. `storeResult: false` now stores no result at all; duplicates return a short text summary.
+- **Log hygiene.** The proxy reduces a guard event's `error` to name, code, and classification below debug; `describeErrorForLevel` does the same for connection logs. Debug remains the only level with full downstream text, and the docs say so.
+- **Env masking.** `loadConfig` records every value it resolves from `${VAR}`; `mask.ts` replaces values of six or more characters in forwarded stderr, failure fields, status, and doctor output.
+- **errorSummary.** Every failure completion writes `ClassName [CODE/classification]: reason` with a fixed reason list, never the raw message; `twiceshy show` prints it.
+- **Surface failures.** A failed resources or prompts listing is logged at warn, recorded on the connection, and shown by `twiceshy_status` and `doctor`, replacing the old silent empty list.
+- **CI.** The root scripts used single-quoted pnpm filters, which cmd.exe on Windows passed literally, so Windows builds and typechecks matched no packages. The filters are now double-quoted. CI builds before test and a Vitest global setup builds once, so parallel workers never race over `dist`.

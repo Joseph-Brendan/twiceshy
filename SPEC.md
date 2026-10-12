@@ -704,6 +704,38 @@ TypeScript settings must include `strict`, `noUncheckedIndexedAccess`, `exactOpt
 - **Error reference**, one entry per code.
 - `CITATION.cff` so the repo can be cited, matching Joseph's Zenodo plan.
 
+### C20. Amendments after the Phase 6.2 compliance review
+
+These rules were decided after the first compliance review. Where they conflict with earlier sections, these win.
+
+**Correctness**
+
+1. **Conditional completion.** `complete()` writes only when the record is still `IN_FLIGHT` and still belongs to the same attempt that claimed it. Each claim gets an attempt token, and the store checks it inside the same atomic operation. If the condition fails, `complete()` writes nothing and reports that the record changed, and the guard follows the late-completion rules below. This holds even when the guard's own re-read of the record failed.
+2. **Late result against another process.** If another process marked the record `IN_DOUBT`, the late result upgrades it through `lateCompletion`.
+3. **Late result against a human decision.** Twiceshy never overwrites a human resolution. If the late result agrees with it, nothing changes. If it contradicts it, Twiceshy emits a `resolution-conflict` event at error level, logged even at the default level. If the human said "failed" but the action actually succeeded, the record must block the next identical call with `IN_DOUBT` until a human resolves it again. A contradiction that could allow a duplicate must never pass silently.
+4. **Cancelled before start.** If a call is cancelled after the claim but before the tool function was invoked, the guard knows the action did not happen. It records `FAILED_DEFINITE` with reason "cancelled before start", not `IN_DOUBT`. A cancellation after invocation still becomes `IN_DOUBT`.
+
+**Secrets**
+
+5. **Logs never contain raw downstream error text by default.** At `warn` and `info` levels, events log the error's class name, Twiceshy error code, and classification only. The full message appears only at `debug`, and the docs warn that debug logs may contain text from downstream servers.
+6. **Results are redacted before storage** with the same field rules as arguments. Duplicate results returned to callers come from the stored, redacted copy, and `_meta["dev.twiceshy/outcome"]` includes `resultRedacted: true` when any field was replaced. `storeResult: false` stores no result at all, and a duplicate then returns a short text summary saying the action already ran. Field-name redaction cannot find secrets inside free text. `docs/limits.md` must say so.
+7. **Known secret values are masked in diagnostics.** Any environment variable value that Twiceshy resolved from `${VAR}` in config is replaced with `[redacted]` wherever downstream stderr is printed, including in `doctor`. Values shorter than 6 characters are not masked, to avoid hiding ordinary text.
+8. **`errorSummary` is filled in** by Twiceshy with a safe description: the error class name, Twiceshy code, classification, and one of these reasons: timeout after N ms, cancelled, downstream crashed, or ambiguous error. It never contains the raw error message. `twiceshy show` displays it.
+
+**Error handling**
+
+9. **C9 rule 1 exception.** A catch may swallow an error only when there is nowhere left to report it, for example a failed write to stderr, or a cleanup failure while the original error is already being rethrown. Each such catch must carry a comment starting `// last resort:` explaining why. Every other failure must be logged at `warn` or higher, or returned as an error.
+10. A failure to list a downstream server's resources or prompts is logged at `warn` and shown in `twiceshy_status` and `doctor`. It never looks like an empty list.
+
+**Spec catches up with the code**
+
+11. `GuardOutcome.originalAt` may be `null` when the stored record has no completion time (see the C6 edge rules).
+12. The CLI `resolve` and `allow` commands require `--by <name>`. Every command accepts `--config`, `--json`, and `--log-level`. The proxy package also installs a `mcp-proxy` bin alias.
+13. Additional guard options: `purge()`, `maxResultBytes`, `timeoutMs`, `leaseMs`, `closeTimeoutMs`, `closeStore`, and the hooks `onGuardBypassed`, `onWarning`, `onResolutionConflict`.
+14. Additional proxy config: `cwd` for stdio servers, per-tool `ignoreFields`, `timeoutMs`, `storeResult`, top-level `retention`, `exposeRecentActions`, and `store.type: "memory"`.
+15. Repository layout: proxy tools may live in `proxy.ts`. The extra modules `logger.ts`, `restart.ts`, `version.ts`, `stores/record.ts`, `stores/types.ts`, the `scripts/` folder, the extra Vitest configs, `stryker.config.json`, `NOTES.md`, and `SPEC-COMPLIANCE.md` are accepted.
+16. Stryker is part of the dev toolchain for mutation testing (C1).
+
 ---
 
 ## Part D. Build phases
@@ -849,8 +881,3 @@ Copy this part into Antigravity's rules or customisation settings for this works
 - **MCP SDK v2 changes.** The SDK is young and versions together across packages. Pin to a minor version range and test against new releases in CI before widening it.
 - **Single machine only.** SqliteStore cannot protect agents running on several servers. Teams at that scale need the future Redis or Postgres store, and the README must say so up front.
 
-**Open questions for Joseph**
-
-1. Is "Twiceshy" the final name? It must be settled before Phase 0.
-2. Should v1.1 include ready-made `keyFields` presets for Paystack, Flutterwave, and Stripe tools? This would be a strong local advantage and fits the African twins tool later.
-3. Should the repeat-action guard become the shared base layer for resume-after-drop and consequence preview, as discussed? If yes, the store interface in C12 is the part they would reuse, and it is worth keeping stable from the start.
