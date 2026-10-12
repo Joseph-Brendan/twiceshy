@@ -83,6 +83,10 @@ Full details are in [packages/mcp-proxy/README.md](packages/mcp-proxy/README.md)
 
 The formal specification is in [SPEC.md](SPEC.md).
 
+## Citation
+
+If you use Twiceshy in research or production, please cite it. The archived release has DOI [10.5281/zenodo.23319599](https://doi.org/10.5281/zenodo.23319599). Machine-readable metadata is in [CITATION.cff](CITATION.cff).
+
 ## License
 
 MIT. Copyright 2026 Joseph Brendan, Dev and Design HQ.

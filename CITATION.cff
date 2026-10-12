@@ -1,6 +1,7 @@
 cff-version: 1.2.0
 message: "If you use Twiceshy in research or production, please cite it as below."
 title: "Twiceshy: Repeat-Action Guard for AI Agents"
+doi: 10.5281/zenodo.23319599
 version: "0.1.0"
 authors:
   - family-names: "Brendan"
