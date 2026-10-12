@@ -56,3 +56,6 @@ jobs:
 
       - name: Pack and install test
         run: pnpm test:pack
+
+      - name: Smoke test
+        run: pnpm test:smoke
