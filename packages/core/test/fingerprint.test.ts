@@ -95,6 +95,13 @@ describe('canonicalize', () => {
     expect(error.what).toContain('NaN');
   });
 
+  it('names a root-level field without a path label and a nested field with its path', () => {
+    const root = captureError(() => canonicalize(Number.NaN)) as NotSerializableError;
+    expect(root.what).toBe('The value cannot be serialized: NaN.');
+    const field = captureError(() => canonicalize({ amount: Number.NaN })) as NotSerializableError;
+    expect(field.what).toBe('The value at "amount" cannot be serialized: NaN.');
+  });
+
   it('rejects an invalid Date with NOT_SERIALIZABLE', () => {
     const error = captureError(() => canonicalize(new Date(Number.NaN))) as NotSerializableError;
     expect(error).toBeInstanceOf(NotSerializableError);
@@ -107,6 +114,18 @@ describe('canonicalize', () => {
     const error = captureError(() => canonicalize(value)) as NotSerializableError;
     expect(error).toBeInstanceOf(NotSerializableError);
     expect(error.what).toContain('a symbol-keyed property');
+  });
+
+  it('serialises the same object twice without calling it circular', () => {
+    const shared = { price: 2 };
+    expect(canonicalize({ first: shared, second: shared })).toBe(
+      '{"first":{"price":2},"second":{"price":2}}',
+    );
+  });
+
+  it('serialises a shared object inside two arrays without calling it circular', () => {
+    const shared = { price: 2 };
+    expect(canonicalize([shared, shared])).toBe('[{"price":2},{"price":2}]');
   });
 
   it('compares strings exactly without Unicode normalisation', () => {
@@ -207,6 +226,17 @@ describe('selectFields', () => {
     expect((selected as { nested: unknown }).nested).not.toBe(input.nested);
   });
 
+  it('ignoreFields copies a shared object at each location instead of stopping at the second', () => {
+    const shared = { password: 'x', keep: 1 };
+    const input = { a: shared, b: shared };
+    const { selected } = selectFields(input, { ignoreFields: [] });
+    const result = selected as { a: typeof shared; b: typeof shared };
+    expect(result.a).toEqual({ password: 'x', keep: 1 });
+    expect(result.b).toEqual({ password: 'x', keep: 1 });
+    expect(result.a).not.toBe(shared);
+    expect(result.b).not.toBe(shared);
+  });
+
   it('ignoreFields tolerates dates and circular references', () => {
     const when = new Date('2026-01-01T00:00:00.000Z');
     const args: Record<string, unknown> = { when };
@@ -237,14 +267,25 @@ describe('normalisers', () => {
       expect(configError.code).toBe('CONFIG_INVALID');
       expect(configError.what).toContain('amount');
       expect(configError.what).toContain(JSON.stringify(value));
+      expect(configError.why).toContain('normaliser for this field does not accept');
+      expect(configError.fix).toContain('plain decimal number');
+      expect(configError.fix).toContain('remove the normaliser for this field');
     },
   );
+
+  it('F4: number normaliser rejects a non-string, non-number value such as an array', () => {
+    const error = captureError(() => withAmount(['1500'])) as ConfigInvalidError;
+    expect(error).toBeInstanceOf(ConfigInvalidError);
+    expect(error.code).toBe('CONFIG_INVALID');
+    expect(error.what).toContain('amount');
+  });
 
   it('F4: number normaliser rejects NaN and Infinity numbers naming the field and value', () => {
     const nanError = captureError(() => withAmount(Number.NaN)) as ConfigInvalidError;
     expect(nanError).toBeInstanceOf(ConfigInvalidError);
     expect(nanError.what).toContain('amount');
     expect(nanError.what).toContain('NaN');
+    expect(nanError.what).toContain('a finite plain decimal number');
     const infinityError = captureError(() =>
       withAmount(Number.POSITIVE_INFINITY),
     ) as ConfigInvalidError;
@@ -261,6 +302,15 @@ describe('normalisers', () => {
     expect(
       fingerprintOf({ email: '  IFE@Example.COM  ' }, { normalize: { email: 'lowercase-trim' } }),
     ).toBe(fingerprintOf({ email: 'ife@example.com' }));
+  });
+
+  it('plain lowercase does not trim whitespace while lowercase-trim does', () => {
+    const padded = fingerprintOf({ email: ' IFE@X.COM ' }, { normalize: { email: 'lowercase' } });
+    expect(padded).toBe(fingerprintOf({ email: ' ife@x.com ' }));
+    expect(padded).not.toBe(fingerprintOf({ email: 'ife@x.com' }));
+    expect(
+      fingerprintOf({ email: ' IFE@X.COM ' }, { normalize: { email: 'lowercase-trim' } }),
+    ).toBe(fingerprintOf({ email: 'ife@x.com' }));
   });
 
   it('leaves fields without a normaliser untouched', () => {
@@ -309,6 +359,7 @@ describe('normalisers', () => {
     expect(numberError).toBeInstanceOf(ConfigInvalidError);
     expect(numberError.what).toContain('reason');
     expect(numberError.what).toContain('42');
+    expect(numberError.what).toContain('a string');
 
     const booleanError = captureError(() =>
       fingerprintOf({ flag: true }, { normalize: { flag: 'trim' } }),
@@ -322,6 +373,8 @@ describe('normalisers', () => {
     ) as ConfigInvalidError;
     expect(error).toBeInstanceOf(ConfigInvalidError);
     expect(error.what).toContain('uppercase');
+    expect(error.why).toContain('Only "number", "trim", "lowercase", "lowercase-trim"');
+    expect(error.fix).toContain('supported normaliser names');
   });
 });
 
@@ -356,12 +409,14 @@ describe('computeFingerprint', () => {
     const error = captureError(() => fingerprintOf({ callback: () => 1 })) as NotSerializableError;
     expect(error).toBeInstanceOf(NotSerializableError);
     expect(error.what).toContain('args.callback');
+    expect(error.what).toContain('a function');
   });
 
   it('F6: a symbol throws NOT_SERIALIZABLE naming the field path', () => {
     const error = captureError(() => fingerprintOf({ token: Symbol('t') })) as NotSerializableError;
     expect(error).toBeInstanceOf(NotSerializableError);
     expect(error.what).toContain('args.token');
+    expect(error.what).toContain('a symbol');
   });
 
   it('F6: a circular reference throws NOT_SERIALIZABLE naming the field path', () => {
@@ -370,6 +425,7 @@ describe('computeFingerprint', () => {
     const error = captureError(() => fingerprintOf(args)) as NotSerializableError;
     expect(error).toBeInstanceOf(NotSerializableError);
     expect(error.what).toContain('args.self');
+    expect(error.what).toContain('a circular reference');
   });
 
   it('F7: same arguments with a different tool, server, or scope give different fingerprints', () => {

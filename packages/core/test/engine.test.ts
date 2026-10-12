@@ -322,6 +322,7 @@ describe('decide', () => {
     const corrupt = makeRecord({ id: 'rec-corrupt', state: 'BANANA' as RecordState });
     const error = captureError(() => decide(corrupt, REQUEST, NOW, SETTINGS));
     expectStoreUnavailable(error, 'rec-corrupt');
+    expect((error as StoreUnavailableError).what).toContain('record state');
   });
 
   it('the unknown-state error works when the record has no id', () => {
@@ -390,6 +391,7 @@ describe('afterExecution', () => {
       ),
     );
     expectStoreUnavailable(error, 'rec-after');
+    expect((error as StoreUnavailableError).what).toContain('execution outcome');
   });
 });
 
@@ -430,6 +432,7 @@ describe('lateCompletion', () => {
       ),
     );
     expectStoreUnavailable(error, 'rec-late');
+    expect((error as StoreUnavailableError).what).toContain('completion outcome');
   });
 });
 

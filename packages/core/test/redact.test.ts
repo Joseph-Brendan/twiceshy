@@ -19,15 +19,52 @@ function deepFreeze<T>(value: T): T {
 }
 
 describe('redact', () => {
-  it('redacts every default sensitive field name at the top level', () => {
-    const input: Record<string, unknown> = {};
-    for (const field of DEFAULT_REDACT_FIELDS) {
-      input[field] = 'secret-value';
-    }
+  it('redacts every documented default sensitive field name', () => {
+    expect(DEFAULT_REDACT_FIELDS).toEqual([
+      'password',
+      'pin',
+      'otp',
+      'cvv',
+      'cvc',
+      'secret',
+      'token',
+      'apiKey',
+      'api_key',
+      'authorization',
+      'card.number',
+      'cardNumber',
+    ]);
+    const input: Record<string, unknown> = {
+      password: 'x',
+      pin: 'x',
+      otp: 'x',
+      cvv: 'x',
+      cvc: 'x',
+      secret: 'x',
+      token: 'x',
+      apiKey: 'x',
+      api_key: 'x',
+      authorization: 'x',
+      card: { number: 'x' },
+      cardNumber: 'x',
+    };
     const output = redact(input) as Record<string, unknown>;
-    for (const field of DEFAULT_REDACT_FIELDS) {
-      expect(output[field]).toBe(REDACTED);
+    for (const field of [
+      'password',
+      'pin',
+      'otp',
+      'cvv',
+      'cvc',
+      'secret',
+      'token',
+      'apiKey',
+      'api_key',
+      'authorization',
+      'cardNumber',
+    ]) {
+      expect(output[field], field).toBe(REDACTED);
     }
+    expect((output.card as Record<string, unknown>).number).toBe(REDACTED);
   });
 
   it('redacts matching fields at any depth', () => {
@@ -43,6 +80,7 @@ describe('redact', () => {
   it('redacts matching fields inside arrays', () => {
     const input = { cards: [{ cardNumber: '4111111111111111' }, { label: 'personal' }] };
     const output = redact(input) as typeof input;
+    expect(Array.isArray(output.cards)).toBe(true);
     expect(output.cards[0]?.cardNumber).toBe(REDACTED);
     expect(output.cards[1]?.label).toBe('personal');
   });
@@ -60,6 +98,13 @@ describe('redact', () => {
     const output = redact(input) as typeof input;
     expect(output.card.number).toBe(REDACTED);
     expect(output.card.holder).toBe('Ife');
+  });
+
+  it('redacts a caller dot-path whose joined name differs from every flattened default', () => {
+    const input = { bank: { account: '0123456789', holder: 'Ife' } };
+    const output = redact(input, ['bank.account']) as typeof input;
+    expect(output.bank.account).toBe(REDACTED);
+    expect(output.bank.holder).toBe('Ife');
   });
 
   it('does not treat an unrelated field below a dot-path prefix as sensitive', () => {

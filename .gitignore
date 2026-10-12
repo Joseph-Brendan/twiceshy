@@ -8,3 +8,6 @@ coverage/
 *.db-wal
 *.db-shm
 .twiceshy/
+.stryker-tmp/
+reports/
+stryker.log

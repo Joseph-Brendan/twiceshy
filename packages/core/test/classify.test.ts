@@ -126,6 +126,15 @@ describe('classifyError', () => {
     expect(classifyError({ status: '404' }).classification).toBe('definite');
   });
 
+  it('C2: a status string must be exactly three digits and an array is not accepted', () => {
+    for (const status of ['400x', 'x400', '0400', ' 404 ', '4040']) {
+      expect(classifyError({ status }).classification, `status ${JSON.stringify(status)}`).toBe(
+        'ambiguous',
+      );
+    }
+    expect(classifyError({ status: [404] }).classification).toBe('ambiguous');
+  });
+
   it('C2: a response object without a status is ambiguous', () => {
     expect(classifyError({ response: {} }).classification).toBe('ambiguous');
     expect(classifyError({ response: { statusCode: 409 } }).classification).toBe('ambiguous');
@@ -161,6 +170,7 @@ describe('classifyError', () => {
   it('C2: a custom classifier can mark errors ambiguous', () => {
     const result = classifyError({}, { classifier: () => 'ambiguous' });
     expect(result.classification).toBe('ambiguous');
+    expect(result.warning).toBeUndefined();
   });
 
   it('C2: a custom classifier that throws falls back to ambiguous with a warning', () => {
@@ -202,6 +212,11 @@ describe('classifyError', () => {
     expect(classifyError(() => undefined).classification).toBe('ambiguous');
   });
 
+  it('C3: a function-shaped error carrying a definite code is classified by its properties', () => {
+    const thrown = Object.assign(() => undefined, { code: -32602 });
+    expect(classifyError(thrown).classification).toBe('definite');
+  });
+
   it('C3: an object whose getters throw is ambiguous and never throws', () => {
     const hostile = {
       get status() {
@@ -209,7 +224,9 @@ describe('classifyError', () => {
       },
     };
     expect(() => classifyError(hostile)).not.toThrow();
-    expect(classifyError(hostile).classification).toBe('ambiguous');
+    const result = classifyError(hostile);
+    expect(result.classification).toBe('ambiguous');
+    expect(result.warning).toBeUndefined();
   });
 
   it('C3: a Proxy that throws on any property read is ambiguous', () => {
