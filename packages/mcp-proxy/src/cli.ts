@@ -446,8 +446,12 @@ function displayPath(path: string, home: string): string {
   if (path === home) {
     return '~';
   }
-  if (path.startsWith(`${home}/`) || path.startsWith(`${home}\\`)) {
+  if (path.startsWith(`${home}/`)) {
     return `~${path.slice(home.length)}`;
+  }
+  if (path.startsWith(`${home}\\`)) {
+    // Windows joins with backslashes; show the portable "~/..." form.
+    return `~/${path.slice(home.length + 1)}`;
   }
   return path;
 }

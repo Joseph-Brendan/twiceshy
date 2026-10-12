@@ -1,4 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import type {
   CallToolRequestOptions,
@@ -271,6 +273,49 @@ function errorCodeOf(error: unknown): string | undefined {
 
 function nestedErrorCode(error: unknown): string | undefined {
   return error instanceof Error ? errorCodeOf(error.cause) : undefined;
+}
+
+/**
+ * True when a stdio command can be found. The check makes "command not found"
+ * deterministic on every platform: Windows would otherwise report a shell
+ * exit instead of ENOENT.
+ */
+export function commandExists(
+  command: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const windows = platform === 'win32';
+  const pathExt = windows
+    ? (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter((ext) => ext.length > 0)
+    : [''];
+  const candidatesFor = (base: string): string[] => {
+    const candidates = [base];
+    if (windows) {
+      const lower = base.toLowerCase();
+      if (!pathExt.some((ext) => lower.endsWith(ext.toLowerCase()))) {
+        for (const ext of pathExt) {
+          candidates.push(`${base}${ext}`);
+        }
+      }
+    }
+    return candidates;
+  };
+  const hasSeparator = command.includes('/') || command.includes('\\');
+  const directories = hasSeparator ? [''] : (env.PATH ?? '').split(windows ? ';' : ':');
+  for (const directory of directories) {
+    const base = directory === '' ? command : join(directory, command);
+    for (const candidate of candidatesFor(base)) {
+      try {
+        if (statSync(candidate).isFile()) {
+          return true;
+        }
+      } catch {
+        // Keep looking.
+      }
+    }
+  }
+  return false;
 }
 
 function serverTarget(config: ServerConfig): { target: string; targetKind: 'command' | 'url' } {
@@ -611,6 +656,20 @@ export async function connectDownstream(
 ): Promise<
   { ok: true; connection: DownstreamConnection } | { ok: false; failure: DownstreamFailure }
 > {
+  if (config.kind === 'stdio' && !commandExists(config.command)) {
+    const failure = maskFailure(
+      startupFailure(
+        name,
+        config,
+        new Error(`spawn ${config.command} ENOENT`),
+        { exitCode: null, exitSignal: null, stderr: [] },
+        options.connectTimeoutMs ?? 15_000,
+      ),
+      options.maskSecrets,
+    );
+    options.logger.error(`${failure.what} Fix: ${failure.fix}`);
+    return { ok: false, failure };
+  }
   try {
     const connection = await ManagedConnection.start(name, config, options, failures);
     return { ok: true, connection };

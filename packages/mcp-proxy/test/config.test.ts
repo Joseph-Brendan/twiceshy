@@ -82,13 +82,16 @@ describe('config', () => {
     );
     expect(config.store).toEqual({
       type: 'sqlite',
-      path: '/home/test/.twiceshy/actions.db',
+      path: join('/home/test', '.twiceshy', 'actions.db'),
     });
   });
 
   it('applies the spec defaults', () => {
     const config = loadConfig({ mcpServers: {} }, { home: '/home/test' });
-    expect(config.store).toEqual({ type: 'sqlite', path: '/home/test/.twiceshy/actions.db' });
+    expect(config.store).toEqual({
+      type: 'sqlite',
+      path: join('/home/test', '.twiceshy', 'actions.db'),
+    });
     expect(config.windowMs).toBe(600_000);
     expect(config.retentionMs).toBe(7 * 86_400_000);
     expect(config.onStoreFailure).toBe('closed');

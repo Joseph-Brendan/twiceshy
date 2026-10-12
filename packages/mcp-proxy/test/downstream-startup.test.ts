@@ -1,6 +1,8 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ServerConfig, TransportDiagnostics } from '../src/index.js';
-import { startupFailure } from '../src/index.js';
+import { commandExists, startupFailure } from '../src/index.js';
 
 const STDIO: ServerConfig = {
   kind: 'stdio',
@@ -60,5 +62,28 @@ describe('startup failure reasons', () => {
     expect(failure.target).toBe('my-server --flag');
     expect(failure.targetKind).toBe('command');
     expect(failure.fix).toContain('command and arguments');
+  });
+});
+
+describe('commandExists (C13/E: command not found works on every platform)', () => {
+  it('finds an absolute path that exists and reports one that does not', () => {
+    expect(commandExists(process.execPath)).toBe(true);
+    expect(commandExists(join(tmpdir(), 'definitely-not-a-command-xyz'))).toBe(false);
+  });
+
+  it('finds a bare command through PATH and respects PATHEXT on Windows', () => {
+    expect(commandExists('node')).toBe(true);
+    const env = {
+      PATH: process.platform === 'win32' ? 'C:\\tools' : '/tools',
+      PATHEXT: '.EXE;.CMD',
+    };
+    const platform = process.platform === 'win32' ? 'win32' : 'linux';
+    // A directory that cannot exist proves the search reports a miss.
+    expect(commandExists('definitely-not-a-command-xyz', env, platform)).toBe(false);
+  });
+
+  it('checks PATHEXT extensions on Windows', () => {
+    const env = { PATH: '', PATHEXT: '.EXE;.BAT' };
+    expect(commandExists(process.execPath, env, 'win32')).toBe(true);
   });
 });

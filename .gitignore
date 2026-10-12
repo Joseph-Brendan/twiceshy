@@ -12,3 +12,4 @@ coverage/
 reports/
 stryker.log
 scratch/
+.twiceshy-build.lock
