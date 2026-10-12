@@ -6,7 +6,7 @@ Every error from Twiceshy carries a stable code and three pieces of text: what h
 
 **What it means:** the action may or may not have happened. Twiceshy cannot tell.
 
-**Common cause:** a timeout, a dropped connection, an unknown error, or a caller that cancelled while the action was running. For example, Kola's refund request timed out, but Paystack had already accepted the refund.
+**Common cause:** a timeout, a dropped connection, an unknown error, or a caller that cancelled while the action was running. For example, Kola's refund request timed out, but Paystack had already accepted the refund. A cancellation *before* the tool function was invoked is different: that records `FAILED_DEFINITE` with reason "cancelled before start", because the action certainly did not happen.
 
 **Fix:** a person must check the provider, then resolve the record. Do not retry. The exact fix text:
 
@@ -60,7 +60,7 @@ A person must check whether the action happened, then run `twiceshy resolve <id>
 
 **Common cause:** a tool returned a long list or a large document. For example, 300,000 bytes against a 262,144 byte limit.
 
-**Fix:** raise the limit, or set `storeResult: false`. Duplicates will then return a short summary, not the full result.
+**Fix:** raise the limit, or set `storeResult: false`. With `storeResult: false` the record keeps no result at all, and duplicates return a short summary, not the full result.
 
 ## DOWNSTREAM_UNAVAILABLE
 

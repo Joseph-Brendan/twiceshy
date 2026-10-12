@@ -67,7 +67,14 @@ twiceshy resolve bd43ee5c-64bb-4d44-93d2-3d3d97e82248 --failed --by "kola" --not
 
 `--by` is your name. It is required, because every resolution must name the person who decided.
 
-### 5. Know what happens next
+### 5. A late result can reopen your decision
+
+Sometimes the action finishes after you have already decided. Twiceshy never overwrites what you decided silently:
+
+- If the late result **agrees** with your decision, nothing changes.
+- If it **contradicts** your decision, Twiceshy writes a `resolution-conflict` line to its error log and shows the conflict. If you resolved the action as **failed** but it actually **succeeded**, the record goes back to **in doubt** and the next identical call is blocked until a person decides again. This is the safe direction: it is better to ask twice than to pay twice.
+
+### 6. Know what happens next
 
 - **Resolved as succeeded:** the action is treated as done. The next identical attempt inside the window returns the original result as a duplicate. No money moves again.
 - **Resolved as failed:** the action is treated as not done. The next identical attempt runs normally.

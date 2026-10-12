@@ -60,6 +60,14 @@ npx -y @twiceshy/mcp-proxy doctor --config /path/to/twiceshy.config.json
 
 Full details are in [packages/mcp-proxy/README.md](packages/mcp-proxy/README.md).
 
+## What Twiceshy records and logs
+
+- Arguments and successful results are redacted before storage, using the same field-name rules. Duplicates return the stored, redacted copy.
+- `storeResult: false` stores no result at all; a duplicate then returns a short text summary saying the action already ran.
+- A cancellation before the tool function is invoked is a definite failure (`FAILED_DEFINITE`, reason "cancelled before start"), which is safe to retry. A cancellation after invocation leaves the record in doubt.
+- A late result that contradicts a human resolution fires a `resolution-conflict` event at error level. If the human said "failed" but the action actually succeeded, the record blocks the next call with `IN_DOUBT` until a person decides again.
+- Proxy logs at `warn` and `info` carry only an error's class name, Twiceshy code, and classification. The full downstream message appears only at `--log-level debug`, which may contain text from downstream servers.
+
 ## Examples
 
 - [Library example: the Kola refund](examples/library-paystack-refund): one refund, two retries, one payment.

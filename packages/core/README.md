@@ -82,7 +82,7 @@ Value: {"receipt":"PS-T1"}.
 - **Key fields:** the argument fields that define the action, for example `transaction` and `amount`. Everything else is ignored.
 - **Identity:** the fingerprint, or the explicit key when you pass one. A record is looked up by identity.
 - **Scope:** who the action belongs to, for example one customer or one agent. It is part of the fingerprint.
-- **Record:** what Twiceshy stores about one action: state, timing, redacted arguments, and the result.
+- **Record:** what Twiceshy stores about one action: state, timing, redacted arguments, and the redacted result. Field-name redaction cannot find a secret inside free text.
 - **Window:** how long after an action finishes an identical action counts as a duplicate. Default: 10 minutes.
 - **Lease:** a timed claim that says "this action is running now". If the process dies, the lease runs out.
 - **In doubt:** Twiceshy cannot tell whether the action happened. It stops and asks a person.
@@ -112,7 +112,7 @@ Value: {"receipt":"PS-T1"}.
 | `retention` | `'7d'` | How long records are kept for audit. |
 | `onStoreFailure` | `'closed'` | `'closed'` refuses guarded calls when the store is down. `'open'` runs them and emits `guard-bypassed`. |
 | `waitForInFlightMs` | `5000` | How long a second caller waits for a running action. |
-| `maxResultBytes` | `262144` | Largest result stored in full. Bigger results become a summary for duplicates. |
+| `maxResultBytes` | `262144` | Largest result stored in full. A bigger result fails with `RESULT_TOO_LARGE`; set `storeResult: false` to store nothing and accept a summary on duplicates. |
 | `timeoutMs` | `30000` | Default time limit for one call. |
 | `leaseMs` | `timeoutMs + 30000` | Claim duration. Tests often shorten it. |
 | `closeTimeoutMs` | `30000` | How long `close()` waits for running calls. |
@@ -132,7 +132,7 @@ Value: {"receipt":"PS-T1"}.
 | `normalize` | Per field: `number`, `trim`, `lowercase`, `lowercase-trim`, or a function. |
 | `scope` | A function that computes the scope from the arguments. |
 | `timeoutMs` | Time limit for this tool. |
-| `storeResult` | `false` keeps only a short summary of the result. |
+| `storeResult` | `false` stores no result at all; a duplicate then returns a short text summary saying the action already ran. |
 
 `guard.run(request, fn)` returns `{ status: 'executed', value, record }` or `{ status: 'duplicate', value, record, originalAt }`. It throws a `TwiceshyError` subclass when the call is blocked.
 
@@ -149,7 +149,14 @@ Guard methods:
 | `purge(olderThan)` | Removes records past retention. |
 | `close()` | Stops timers, waits for running calls, and closes the store. |
 
-Hooks receive one structured event per decision: `onExecute`, `onDuplicate`, `onBlocked`, `onInDoubt`, `onLateCompletion`, `onStoreWriteFailed`, `onGuardBypassed`, `onWarning`. Each event carries `type`, `at`, `recordId`, `fingerprint`, `tool`, `server`, `scope`, `durationMs`, and `attempt`. An exception inside a hook is written to stderr and never breaks the guarded call.
+Hooks receive one structured event per decision: `onExecute`, `onDuplicate`, `onBlocked`, `onInDoubt`, `onLateCompletion`, `onResolutionConflict`, `onStoreWriteFailed`, `onGuardBypassed`, `onWarning`. Each event carries `type`, `at`, `recordId`, `fingerprint`, `tool`, `server`, `scope`, `durationMs`, and `attempt`. An exception inside a hook is written to stderr and never breaks the guarded call.
+
+### Results, cancellation, and human decisions
+
+- **Results are redacted before storage.** The same field-name rules used for arguments apply to a successful result. A duplicate returns the stored, redacted copy. The first caller still gets the real result.
+- **`storeResult: false` stores nothing.** The action's record keeps no result, and a duplicate returns a short summary instead.
+- **Cancellation before start is a definite failure.** If the caller cancels after the claim but before the tool function is invoked, the record becomes `FAILED_DEFINITE` with reason "cancelled before start", so the next call may run. Cancellation after invocation leaves the record `IN_DOUBT`.
+- **Human decisions win.** A late result never overwrites a human resolution. If it agrees, nothing changes. If it contradicts the human, Twiceshy emits a `resolution-conflict` event. When a person said "failed" but the action actually succeeded, the record returns to `IN_DOUBT` and blocks the next identical call until a person decides again.
 
 ## Limits
 

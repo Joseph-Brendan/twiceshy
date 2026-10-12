@@ -78,7 +78,7 @@ A runnable version of this setup lives in [examples/proxy-claude-config](../../e
 - **Guarded tool:** a tool the proxy protects with the Twiceshy guard.
 - **Open tool:** a tool the proxy forwards untouched, for example a read-only tool.
 - **Annotations:** hints a tool can carry, such as `readOnlyHint` or `idempotentHint`. Twiceshy treats them as hints, not guarantees.
-- **Duplicate result:** the original tool result, unchanged, plus a note under `_meta["dev.twiceshy/outcome"]`. A visible text line explains what happened.
+- **Duplicate result:** the stored result, which was redacted before storage, plus a note under `_meta["dev.twiceshy/outcome"]`. A visible text line explains what happened. The note says `resultRedacted: true` when any field was replaced, and when `storeResult: false` kept no result the duplicate is a short text summary instead.
 - **Blocked result:** a tool error with `isError: true` that tells the agent what happened, why, and what to do next. The proxy never sends a protocol error for a block.
 
 ### Which tools are guarded
@@ -127,6 +127,7 @@ Per-tool options:
 | `normalize` | Per field: `number`, `trim`, `lowercase`, or `lowercase-trim`. |
 | `timeoutMs` | Time limit for this tool. A timeout becomes `IN_DOUBT`. |
 | `treatToolErrorsAsDefinite` | Treats a tool result with `isError: true` as a definite failure instead of in doubt. |
+| `storeResult` | `false` stores no result at all; a duplicate then returns a short text summary saying the action already ran. |
 
 ## CLI
 
@@ -143,6 +144,10 @@ Per-tool options:
 Every command supports `--help` with an example and `--json` for machine output. Exit codes: 0 success, 1 error, 2 bad usage. Errors print what, why, and fix on separate lines.
 
 Logs go to stderr as JSON lines. `--log-level` accepts `error`, `warn`, `info`, or `debug`. Standard output carries MCP messages only, so the stream stays clean.
+
+At `warn` and `info`, a log line carries only an error's class name, Twiceshy code, and classification. The full downstream message appears only at `debug`, and debug logs may contain text printed by downstream servers, so treat them as sensitive.
+
+A cancellation before the downstream tool is invoked records `FAILED_DEFINITE` with reason "cancelled before start", which is safe to retry. A cancellation after invocation leaves the record `IN_DOUBT`. A late result that contradicts a human resolution logs an error-level `resolution-conflict` event; if the human said "failed" but the action succeeded, the record blocks the next call with `IN_DOUBT`.
 
 ## Proxy tools
 

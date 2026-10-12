@@ -62,6 +62,10 @@ With `storeResult: false`, Twiceshy stores no result at all for the action. A du
 
 Like arguments, a successful result is written through the same field-name redaction list (the built-in one plus your `redact` extras). A duplicate returns that stored, redacted copy, and `_meta["dev.twiceshy/outcome"].resultRedacted` is `true` when any field was replaced. The first caller still gets the real, unredacted result.
 
+## Debug logs can contain downstream text
+
+At the default log levels, Twiceshy logs only an error's class name, code, and classification. `--log-level debug` includes the full message from the downstream server, which may contain text you did not expect. Keep debug logs for troubleshooting and treat them as sensitive.
+
 ## Templated resource reads are not matched back
 
 The proxy forwards resources from downstream servers. A read of a concrete resource URI works. A read whose URI matches a downstream template is not matched back to its server yet. It returns an error.

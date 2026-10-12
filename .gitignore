@@ -11,3 +11,4 @@ coverage/
 .stryker-tmp/
 reports/
 stryker.log
+scratch/
