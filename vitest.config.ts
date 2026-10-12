@@ -21,6 +21,8 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    // Builds both packages once, before parallel workers can race over dist.
+    globalSetup: ['./vitest.global-setup.ts'],
     // X2 to X4 are real multi-process stress tests with their own script.
     exclude: [...configDefaults.exclude, '**/*.stress.test.ts'],
     coverage: {
