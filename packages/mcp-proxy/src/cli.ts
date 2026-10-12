@@ -320,6 +320,13 @@ function renderListTable(records: readonly ActionRecord[]): string {
 }
 
 function renderRecord(record: ActionRecord): string {
+  const succeeded = record.state === 'SUCCEEDED' || record.state === 'RESOLVED_SUCCEEDED';
+  const errorText =
+    record.errorSummary === null
+      ? '-'
+      : succeeded
+        ? `${record.errorSummary} (from an earlier attempt)`
+        : record.errorSummary;
   const lines = [
     `id:          ${record.id}`,
     `state:       ${record.state}`,
@@ -332,7 +339,7 @@ function renderRecord(record: ActionRecord): string {
     `created:     ${formatDate(record.createdAt)}`,
     `started:     ${formatDate(record.startedAt)}`,
     `completed:   ${record.completedAt === null ? '-' : formatDate(record.completedAt)}`,
-    `error:       ${record.errorSummary ?? '-'}`,
+    `error:       ${errorText}`,
     `resolvedBy:  ${record.resolvedBy ?? '-'}`,
     `resolution:  ${record.resolutionNote ?? '-'}`,
     `repeatGrant: ${record.repeatGrant === null ? '-' : JSON.stringify(toJsonRecord(record).repeatGrant)}`,

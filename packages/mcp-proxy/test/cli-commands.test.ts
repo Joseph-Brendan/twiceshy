@@ -339,6 +339,51 @@ describe('L1: commands, help, JSON, and exit codes', () => {
     expect(JSON.parse(refusedJson.text())).toMatchObject({ removed: 0, confirmed: false });
   });
 
+  it('C20.8: show labels a timeout summary on a succeeded record as from an earlier attempt', async () => {
+    const dbPath = join(tempDir(), 'late-success.db');
+    const store = new SqliteStore({ path: dbPath });
+    const now = new Date();
+    const settings = { windowMs: 600_000, waitForInFlightMs: 5_000, leaseMs: 30_000 };
+    const begun = await store.begin({
+      fingerprint: 'fp-late-success',
+      explicitKey: null,
+      serverId: 'local',
+      toolName: 'paystack.refund',
+      scope: '',
+      redactedArgs: { transaction: 'T-LATE' },
+      now,
+      settings,
+    });
+    if (begun.kind !== 'execute') throw new Error('expected execute');
+    await store.complete(begun.record.id, {
+      attemptToken: begun.record.attemptToken,
+      outcome: { type: 'ambiguous-failure' },
+      now,
+      settings,
+      errorSummary: 'none [none/ambiguous]: timeout after 50 ms',
+    });
+    await store.complete(begun.record.id, {
+      attemptToken: begun.record.attemptToken,
+      outcome: { type: 'success', result: 'late value' },
+      now,
+      settings,
+    });
+    await store.close();
+
+    const config = writeConfig({ store: { type: 'sqlite', path: dbPath }, mcpServers: {} });
+    const captured = capture();
+    expect(
+      await runCli(['show', begun.record.id, '--config', config], {
+        io: captured.io,
+        logger: silentLogger(),
+      }),
+    ).toBe(0);
+    expect(captured.text()).toContain('state:       SUCCEEDED');
+    expect(captured.text()).toContain(
+      'error:       none [none/ambiguous]: timeout after 50 ms (from an earlier attempt)',
+    );
+  });
+
   it('uses twiceshy.config.json in the working directory when --config is missing', async () => {
     const dir = tempDir();
     writeFileSync(
