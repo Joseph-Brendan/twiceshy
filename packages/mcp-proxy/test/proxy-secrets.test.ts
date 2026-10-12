@@ -1,7 +1,12 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Writable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import type { Client } from '@modelcontextprotocol/client';
 import { Server } from '@modelcontextprotocol/server';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runCli } from '../src/cli.js';
 import type { LogLevel, ProxyHandle } from '../src/index.js';
 import {
   createLogger,
@@ -11,12 +16,14 @@ import {
   MIN_SECRET_LENGTH,
   maskSecretValues,
 } from '../src/index.js';
+import { REPO_ROOT } from './helpers/built-binary.js';
 import {
   connectInProcess,
   connectToProxy,
   inProcessDownstreams,
   startInProcessProxy,
   textOf,
+  waitUntil,
 } from './helpers/proxy-harness.js';
 
 /**
@@ -189,5 +196,121 @@ describe('C20 rule 7: config records resolved values and the masker hides them',
   it('createSecretMasker leaves text unchanged when there is nothing long enough to mask', () => {
     const mask = createSecretMasker(['short']);
     expect(mask('some short text')).toBe('some short text');
+  });
+});
+
+describe('C20 rule 19: resolvedEnvValues never appears in output, logs, status, or errors', () => {
+  const RELEASE_SECRET = 'sk_live_RELEASECHECK';
+  const LEAKY_FIXTURE = fileURLToPath(new URL('./fixtures/leaky-server.mjs', import.meta.url));
+
+  function leakyConfig(): ReturnType<typeof loadConfig> {
+    return loadConfig(
+      {
+        store: { type: 'memory' },
+        mcpServers: {
+          leaky: {
+            command: process.execPath,
+            args: [LEAKY_FIXTURE],
+            // biome-ignore lint/suspicious/noTemplateCurlyInString: ${VAR} is the documented placeholder syntax
+            env: { TWICESHY_TEST_SECRET: '${TWICESHY_TEST_SECRET}' },
+          },
+        },
+      },
+      { env: { TWICESHY_TEST_SECRET: RELEASE_SECRET } },
+    );
+  }
+
+  it('never appears in a log line at error, warn, info, or debug level', async () => {
+    for (const level of ['error', 'warn', 'info', 'debug'] as const) {
+      const { lines, stream } = captureLines();
+      const proxy = await createProxy({
+        config: leakyConfig(),
+        logger: createLogger({ level, stream }),
+      });
+      proxies.add(proxy);
+      const client = await connectToProxy(proxy);
+      clients.add(client);
+
+      await waitUntil(() => lines.join('').includes('leaky server booted'));
+      const result = await client.callTool({ name: 'leaky__explode', arguments: {} });
+      expect(result.isError).toBe(true);
+      const status = await client.callTool({ name: 'twiceshy_status', arguments: {} });
+      expect(textOf(status.content[0])).toContain('leaky');
+
+      const logged = lines.join('');
+      expect(logged, level).not.toContain(RELEASE_SECRET);
+      expect(logged, level).toContain('[redacted]');
+    }
+  });
+
+  it('never appears in a blocked tool result or a stored record', async () => {
+    const { lines, stream } = captureLines();
+    const proxy = await createProxy({
+      config: leakyConfig(),
+      logger: createLogger({ level: 'warn', stream }),
+    });
+    proxies.add(proxy);
+    const client = await connectToProxy(proxy);
+    clients.add(client);
+
+    const result = await client.callTool({ name: 'leaky__explode', arguments: {} });
+    expect(result.isError).toBe(true);
+    expect(textOf(result.content[0])).not.toContain(RELEASE_SECRET);
+    expect(textOf(result.content[0]).toLowerCase()).toContain('unavailable');
+
+    const [record] = await proxy.store.list({ toolName: 'explode' });
+    expect(record?.errorSummary ?? '').not.toContain(RELEASE_SECRET);
+    expect(lines.join('')).not.toContain(RELEASE_SECRET);
+  });
+
+  it('never appears in doctor text or doctor --json output', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'twiceshy-release-'));
+    try {
+      const configFile = join(dir, 'config.json');
+      writeFileSync(
+        configFile,
+        JSON.stringify({
+          store: { type: 'memory' },
+          mcpServers: {
+            leaky: {
+              command: process.execPath,
+              args: [LEAKY_FIXTURE],
+              // biome-ignore lint/suspicious/noTemplateCurlyInString: ${VAR} is the documented placeholder syntax
+              env: { TWICESHY_TEST_SECRET: '${TWICESHY_TEST_SECRET}' },
+            },
+          },
+        }),
+      );
+      process.env.TWICESHY_TEST_SECRET = RELEASE_SECRET;
+      for (const argv of [
+        ['doctor', '--config', configFile],
+        ['doctor', '--json', '--config', configFile],
+      ]) {
+        let out = '';
+        let err = '';
+        const code = await runCli(argv, {
+          io: {
+            out: (text) => {
+              out += text;
+            },
+            err: (text) => {
+              err += text;
+            },
+          },
+          cwd: REPO_ROOT,
+        });
+        expect(code, argv.join(' ')).toBe(0);
+        expect(out, argv.join(' ')).not.toContain(RELEASE_SECRET);
+        expect(err, argv.join(' ')).not.toContain(RELEASE_SECRET);
+        if (argv.includes('--json')) {
+          expect(out, argv.join(' ')).toContain('"surface": "resources"');
+        } else {
+          expect(out, argv.join(' ')).toContain('could not list resources');
+        }
+      }
+    } finally {
+      delete process.env.TWICESHY_TEST_SECRET;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

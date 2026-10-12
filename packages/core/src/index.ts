@@ -11,4 +11,4 @@ export * from './redact.js';
 export { MemoryStore } from './stores/memory.js';
 export * from './stores/types.js';
 
-export const VERSION = '0.0.0';
+export const VERSION = '0.1.0';

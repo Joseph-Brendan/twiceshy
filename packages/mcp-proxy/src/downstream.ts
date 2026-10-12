@@ -19,6 +19,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import type { ServerConfig } from './config.js';
 import type { Logger } from './logger.js';
 import { RestartScheduler } from './restart.js';
+import { PROXY_VERSION } from './version.js';
 
 /**
  * Downstream connections (C13). One broken server never stops the others:
@@ -117,7 +118,7 @@ export interface ConnectDownstreamOptions {
   maskSecrets?: (text: string) => string;
 }
 
-const DEFAULT_CLIENT_INFO: Implementation = { name: 'twiceshy', version: '0.0.0' };
+const DEFAULT_CLIENT_INFO: Implementation = { name: 'twiceshy', version: PROXY_VERSION };
 
 function parentEnvironment(): Record<string, string> {
   const environment: Record<string, string> = {};
@@ -133,9 +134,20 @@ function describeError(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** C20 rule 5: raw error text is logged only at debug level. */
-function describeErrorForLevel(logger: Logger, cause: unknown): string {
-  return logger.level === 'debug' ? describeError(cause) : errorClassName(cause);
+/**
+ * C20 rules 5 and 19: raw error text is logged only at debug level, and even
+ * there known config secrets are masked before the line is written.
+ */
+function describeErrorForLevel(
+  logger: Logger,
+  cause: unknown,
+  maskSecrets?: (text: string) => string,
+): string {
+  if (logger.level !== 'debug') {
+    return errorClassName(cause);
+  }
+  const text = describeError(cause);
+  return maskSecrets === undefined ? text : maskSecrets(text);
 }
 
 function errorClassName(cause: unknown): string {
@@ -572,7 +584,9 @@ class ManagedConnection implements DownstreamConnection {
       return items;
     } catch (cause) {
       const logger = this.options.logger.child(this.name);
-      logger.warn(`could not list ${surface}: ${describeErrorForLevel(logger, cause)}`);
+      logger.warn(
+        `could not list ${surface}: ${describeErrorForLevel(logger, cause, this.options.maskSecrets)}`,
+      );
       recordSurfaceFailure(this, surface, describeError(cause));
       return [];
     }
@@ -621,7 +635,9 @@ class ManagedConnection implements DownstreamConnection {
       await this.options.onRestarted?.(this);
       return true;
     } catch (cause) {
-      child.warn(`restart attempt failed: ${describeErrorForLevel(child, cause)}`);
+      child.warn(
+        `restart attempt failed: ${describeErrorForLevel(child, cause, this.options.maskSecrets)}`,
+      );
       return false;
     }
   }

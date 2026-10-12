@@ -78,7 +78,7 @@ export function ensureBuilt(): void {
   try {
     // Re-check under the lock: another worker may have just finished.
     if (!distIsFresh()) {
-      const result = spawnSync('pnpm', ['build'], {
+      const result = spawnSync('pnpm build', {
         cwd: REPO_ROOT,
         shell: true,
         encoding: 'utf8',

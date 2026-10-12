@@ -28,7 +28,7 @@ function readManifest(relativePath: string): Manifest {
 const EXPECTED_KEYWORDS = ['mcp', 'ai-agents', 'idempotency', 'retries', 'duplicate-prevention'];
 
 function expectCommonFields(manifest: Manifest, directory: string): void {
-  expect(manifest.version).toBe('0.0.0');
+  expect(manifest.version).toBe('0.1.0');
   expect(manifest.description).toBeTruthy();
   expect(manifest.keywords).toEqual(EXPECTED_KEYWORDS);
   expect(manifest.author).toBe('Joseph Brendan');

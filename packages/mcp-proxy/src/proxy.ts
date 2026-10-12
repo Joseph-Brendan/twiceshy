@@ -129,12 +129,20 @@ function describeError(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** C20 rule 5: raw error text is logged only at debug level. */
-function safeErrorText(logger: Logger, cause: unknown): string {
-  if (logger.level === 'debug') {
-    return describeError(cause);
+/**
+ * C20 rules 5 and 19: raw error text is logged only at debug level, and even
+ * there known config secrets are masked before the line is written.
+ */
+function safeErrorText(
+  logger: Logger,
+  cause: unknown,
+  maskSecrets?: (text: string) => string,
+): string {
+  if (logger.level !== 'debug') {
+    return cause instanceof Error ? cause.name : typeof cause;
   }
-  return cause instanceof Error ? cause.name : typeof cause;
+  const text = describeError(cause);
+  return maskSecrets === undefined ? text : maskSecrets(text);
 }
 
 function toolText(text: string, isError = false): CallToolResult {
@@ -263,12 +271,18 @@ function toProxyTool(tool: ProxyTool): Tool {
  * Twiceshy code, and classification. The full downstream message is written
  * only at debug, where the docs warn it may contain downstream text.
  */
-function safeErrorField(logger: Logger, event: GuardEvent): unknown {
+function safeErrorField(
+  logger: Logger,
+  maskSecrets: (text: string) => string,
+  event: GuardEvent,
+): unknown {
   if (event.error === undefined) {
     return undefined;
   }
   if (logger.level === 'debug') {
-    return event.error;
+    return event.error instanceof Error
+      ? { name: event.error.name, message: maskSecrets(event.error.message) }
+      : event.error;
   }
   const name = event.error instanceof Error ? event.error.name : typeof event.error;
   const code = isTwiceshyError(event.error) ? event.error.code : undefined;
@@ -284,10 +298,16 @@ function safeErrorField(logger: Logger, event: GuardEvent): unknown {
 }
 
 /** One structured JSON line per guard event, at the C15-recommended level. */
-function logGuardEvent(logger: Logger, event: GuardEvent): void {
+function logGuardEvent(
+  logger: Logger,
+  maskSecrets: (text: string) => string,
+  event: GuardEvent,
+): void {
   const child = logger.child(event.server);
   const fields =
-    event.error === undefined ? { ...event } : { ...event, error: safeErrorField(logger, event) };
+    event.error === undefined
+      ? { ...event }
+      : { ...event, error: safeErrorField(logger, maskSecrets, event) };
   switch (event.type) {
     case 'execute':
       child.debug(`executed ${event.tool}`, fields);
@@ -417,15 +437,15 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
         // C13: shutdown waits up to 10 s for in-flight calls.
         closeTimeoutMs: SHUTDOWN_LIMIT_MS,
         hooks: {
-          onExecute: (event) => logGuardEvent(logger, event),
-          onDuplicate: (event) => logGuardEvent(logger, event),
-          onBlocked: (event) => logGuardEvent(logger, event),
-          onInDoubt: (event) => logGuardEvent(logger, event),
-          onLateCompletion: (event) => logGuardEvent(logger, event),
-          onResolutionConflict: (event) => logGuardEvent(logger, event),
-          onStoreWriteFailed: (event) => logGuardEvent(logger, event),
-          onGuardBypassed: (event) => logGuardEvent(logger, event),
-          onWarning: (event) => logGuardEvent(logger, event),
+          onExecute: (event) => logGuardEvent(logger, maskSecrets, event),
+          onDuplicate: (event) => logGuardEvent(logger, maskSecrets, event),
+          onBlocked: (event) => logGuardEvent(logger, maskSecrets, event),
+          onInDoubt: (event) => logGuardEvent(logger, maskSecrets, event),
+          onLateCompletion: (event) => logGuardEvent(logger, maskSecrets, event),
+          onResolutionConflict: (event) => logGuardEvent(logger, maskSecrets, event),
+          onStoreWriteFailed: (event) => logGuardEvent(logger, maskSecrets, event),
+          onGuardBypassed: (event) => logGuardEvent(logger, maskSecrets, event),
+          onWarning: (event) => logGuardEvent(logger, maskSecrets, event),
         },
       }),
     );
@@ -769,7 +789,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       await server.sendToolListChanged();
       child.info(`tool list changed; now ${connection.tools.length} tool(s)`);
     } catch (cause) {
-      child.error(`could not refresh the tool list: ${safeErrorText(child, cause)}`);
+      child.error(`could not refresh the tool list: ${safeErrorText(child, cause, maskSecrets)}`);
     }
   };
 
@@ -795,7 +815,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       await server.sendResourceListChanged();
     } catch (cause) {
       // C20 rule 10: keep the previous list and record why it failed.
-      child.warn(`could not list resources: ${safeErrorText(child, cause)}`);
+      child.warn(`could not list resources: ${safeErrorText(child, cause, maskSecrets)}`);
       recordSurfaceFailure(connection, 'resources', describeError(cause));
     }
   };
@@ -816,7 +836,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       await server.sendPromptListChanged();
     } catch (cause) {
       // C20 rule 10: keep the previous list and record why it failed.
-      child.warn(`could not list prompts: ${safeErrorText(child, cause)}`);
+      child.warn(`could not list prompts: ${safeErrorText(child, cause, maskSecrets)}`);
       recordSurfaceFailure(connection, 'prompts', describeError(cause));
     }
   };
@@ -866,7 +886,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       await Promise.all(
         [...guards.values()].map((guard) =>
           guard.close().catch((cause: unknown) => {
-            logger.warn(`closing the guard failed: ${safeErrorText(logger, cause)}`);
+            logger.warn(`closing the guard failed: ${safeErrorText(logger, cause, maskSecrets)}`);
           }),
         ),
       );

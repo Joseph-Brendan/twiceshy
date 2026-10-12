@@ -89,3 +89,9 @@ Decisions taken while implementing the C20 amendments:
 - **errorSummary.** Every failure completion writes `ClassName [CODE/classification]: reason` with a fixed reason list, never the raw message; `twiceshy show` prints it.
 - **Surface failures.** A failed resources or prompts listing is logged at warn, recorded on the connection, and shown by `twiceshy_status` and `doctor`, replacing the old silent empty list.
 - **CI.** The root scripts used single-quoted pnpm filters, which cmd.exe on Windows passed literally, so Windows builds and typechecks matched no packages. The filters are now double-quoted. CI builds before test and a Vitest global setup builds once, so parallel workers never race over `dist`.
+
+## Release 0.1.0 prep
+
+- C20 rule 19: a test sets a config env value to `sk_live_RELEASECHECK` and proves it never appears in `doctor`, `doctor --json`, `twiceshy_status`, a blocked result, a stored `errorSummary`, or a log line at error, warn, info, or debug. The fix masks known config secrets in debug-level error text as well (`logGuardEvent`, `safeErrorText`, `describeErrorForLevel`, `loadSurface`).
+- Version constants (`VERSION`, `PROXY_VERSION`) and the client identity the proxy reports downstream are now 0.1.0; the packaging tests assert 0.1.0.
+- `pnpm changeset version` bumped both packages to 0.1.0, wrote both changelogs, and the packed proxy manifest resolves `twiceshy` to `0.1.0`.
