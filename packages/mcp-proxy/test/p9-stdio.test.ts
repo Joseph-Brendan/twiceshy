@@ -48,11 +48,23 @@ describe('P9: stdout purity of the built proxy', () => {
       }),
     );
 
-    const child = spawn(process.execPath, [CLI_PATH, 'proxy', '--config', configFile], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, NODE_ENV: 'production' },
-    });
+    const child = spawn(
+      process.execPath,
+      [CLI_PATH, 'proxy', '--log-level', 'debug', '--config', configFile],
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, NODE_ENV: 'production' },
+      },
+    );
     children.add(child);
+    const stderrLines: string[] = [];
+    let exitInfo = '';
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrLines.push(chunk.toString());
+    });
+    child.on('exit', (code, signal) => {
+      exitInfo = `proxy exited code=${String(code)} signal=${String(signal)}`;
+    });
 
     const stdoutLines: string[] = [];
     const pending = new Map<number, (message: { result?: unknown }) => void>();
@@ -86,7 +98,11 @@ describe('P9: stdout purity of the built proxy', () => {
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(id);
-          reject(new Error(`timed out waiting for ${method}`));
+          reject(
+            new Error(
+              `timed out waiting for ${method}${exitInfo === '' ? '' : ` (${exitInfo})`}; stderr: ${stderrLines.join('')}`,
+            ),
+          );
         }, 20_000);
         pending.set(id, (message) => {
           clearTimeout(timer);
