@@ -82,6 +82,22 @@ export function resetFiles(names) {
   }
 }
 
+/**
+ * Downloads and caches an npx package once, so a later spawn does not spend
+ * the proxy's 15 s connect timeout on the download (Windows is slow at this).
+ */
+export function warmNpxPackage(name) {
+  const args = ['-y', '--package', name, '--', 'node', '-e', 'process.exit(0)'];
+  return new Promise((resolve) => {
+    const child =
+      process.platform === 'win32'
+        ? spawn(`npx ${args.join(' ')}`, { stdio: 'ignore', shell: true })
+        : spawn('npx', args, { stdio: 'ignore' });
+    child.on('error', () => resolve(false));
+    child.on('close', (code) => resolve(code === 0));
+  });
+}
+
 /** A tiny JSON-RPC client for the proxy's stdio transport. */
 export function startProxy(configPath) {
   const child = spawn(process.execPath, [cliPath(), 'proxy', '--config', configPath], {

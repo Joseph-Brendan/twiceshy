@@ -82,7 +82,10 @@ reason.
 
 `demo5.js` adds the official filesystem server to `proxy.config.json` and runs
 `doctor` again. The first run downloads that server with `npx`, which can take
-half a minute. Read the GUARDED/open reasons doctor prints, especially
+half a minute, so the demo downloads it once itself before `doctor` starts;
+otherwise the proxy's 15-second connect timeout can expire while `npx` is still
+fetching (Windows is especially slow at this). Read the GUARDED/open reasons
+doctor prints, especially
 `write_file` and `create_directory` (open because they claim to be idempotent)
 against `edit_file` and `move_file` (guarded because they are destructive).
 
