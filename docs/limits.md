@@ -24,7 +24,7 @@ If free text such as `reason` or `note` is part of the fingerprint, a rephrased 
 
 ## Legitimate repeats are blocked
 
-A genuinely intended repeat inside the window is stopped, on purpose. A person can approve exactly one repeat with `twiceshy allow`. Without that approval, the guard treats the second call as a duplicate.
+A genuinely intended repeat inside the window is stopped, on purpose. A person can approve exactly one repeat with `npx -y @twiceshy/mcp-proxy allow <fingerprint> --by <name>` (the `twiceshy` command is installed by `@twiceshy/mcp-proxy`). Without that approval, the guard treats the second call as a duplicate.
 
 ## Human decisions stay human
 

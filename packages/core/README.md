@@ -158,6 +158,29 @@ Hooks receive one structured event per decision: `onExecute`, `onDuplicate`, `on
 - **Cancellation before start is a definite failure.** If the caller cancels after the claim but before the tool function is invoked, the record becomes `FAILED_DEFINITE` with reason "cancelled before start", so the next call may run. Cancellation after invocation leaves the record `IN_DOUBT`.
 - **Human decisions win.** A late result never overwrites a human resolution. If it agrees, nothing changes. If it contradicts the human, Twiceshy emits a `resolution-conflict` event. When a person said "failed" but the action actually succeeded, the record returns to `IN_DOUBT` and blocks the next identical call until a person decides again.
 
+## Inspecting and resolving records
+
+The library has no command-line tool. The `twiceshy` command is installed by
+`@twiceshy/mcp-proxy`:
+
+```bash
+npm install @twiceshy/mcp-proxy
+npx twiceshy list --config twiceshy.config.json
+```
+
+With nothing installed, run the same commands as
+`npx -y @twiceshy/mcp-proxy <command>`, for example
+`npx -y @twiceshy/mcp-proxy show <record-id>`. The config file needs the same
+`store` as your library code, for example:
+
+```json
+{ "store": { "type": "sqlite", "path": "./.twiceshy/actions.db" }, "mcpServers": {} }
+```
+
+`resolve <id> --succeeded|--failed --by <name>` settles an in-doubt record,
+and `allow <fingerprint> --by <name>` approves one repeat. Both require the
+name of the person deciding.
+
 ## Limits
 
 - `MemoryStore` loses all records when the process restarts. Use `SqliteStore` for anything that matters.

@@ -131,6 +131,11 @@ Per-tool options:
 
 ## CLI
 
+This package installs the `twiceshy` command. If you have not installed it,
+run every command in the table as `npx -y @twiceshy/mcp-proxy <command>`, for
+example `npx -y @twiceshy/mcp-proxy doctor --config twiceshy.config.json`. The
+core `twiceshy` library does not include a command-line tool.
+
 | Command | What it does |
 |---|---|
 | `twiceshy proxy --config <file>` | Runs the proxy. This is what your MCP client launches. With no subcommand, the package runs `proxy`. |

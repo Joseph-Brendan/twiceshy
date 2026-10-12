@@ -29,7 +29,7 @@ Your agent cannot approve anything by itself. Approval only happens through the 
 
 ## Step by step
 
-In the commands below, `twiceshy` means the command installed by the proxy package. If you do not have it installed, write `npx -y @twiceshy/mcp-proxy` instead. The `--config` option points at your own config file.
+In the commands below, `twiceshy` means the command installed by the `@twiceshy/mcp-proxy` package. If you have not installed that package, write `npx -y @twiceshy/mcp-proxy` in front of the command instead, for example `npx -y @twiceshy/mcp-proxy list --state IN_DOUBT --config twiceshy.config.json`. The core `twiceshy` library has no command-line tool. The `--config` option points at your own config file.
 
 ### 1. See what is waiting
 

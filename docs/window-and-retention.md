@@ -32,8 +32,10 @@ Twiceshy removes old records at most once an hour, in the background, and never 
 You can also clean up by hand:
 
 ```bash
-twiceshy purge --older-than 30d --yes --config twiceshy.config.json
+npx -y @twiceshy/mcp-proxy purge --older-than 30d --yes --config twiceshy.config.json
 ```
+
+The `twiceshy` command is installed by `@twiceshy/mcp-proxy`; the core library has no command-line tool.
 
 Without `--yes`, the command asks for confirmation first.
 

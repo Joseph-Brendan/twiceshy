@@ -8,7 +8,7 @@ Every error from Twiceshy carries a stable code and three pieces of text: what h
 
 **Common cause:** a timeout, a dropped connection, an unknown error, or a caller that cancelled while the action was running. For example, Kola's refund request timed out, but Paystack had already accepted the refund. A cancellation *before* the tool function was invoked is different: that records `FAILED_DEFINITE` with reason "cancelled before start", because the action certainly did not happen.
 
-**Fix:** a person must check the provider, then resolve the record. Do not retry. The exact fix text:
+**Fix:** a person must check the provider, then resolve the record. Do not retry. The `twiceshy` command below is installed by `@twiceshy/mcp-proxy`, not by the core library; with only `twiceshy` installed, run it as `npx -y @twiceshy/mcp-proxy resolve <id> --succeeded --by <name>`. The exact fix text:
 
 ```text
 A person must check whether the action happened, then run `twiceshy resolve <id> --succeeded` or `--failed`. Do not retry.

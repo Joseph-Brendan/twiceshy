@@ -136,7 +136,7 @@ Use `normalize: { amount: 'number' }` for money fields. Use `trim`, `lowercase`,
 
 1. Run the same action twice with the same key fields and a reworded free-text field. Twiceshy should return a duplicate.
 2. Run it twice with a different value in one key field, for example a bigger amount. The second call should run as a new action.
-3. Run `twiceshy doctor`. When a guarded tool has no `keyFields` and has a free-text field, doctor prints a warning that names the field.
+3. Run `npx -y @twiceshy/mcp-proxy doctor --config twiceshy.config.json`. When a guarded tool has no `keyFields` and has a free-text field, doctor prints a warning that names the field.
 
 ## Rules of thumb
 
