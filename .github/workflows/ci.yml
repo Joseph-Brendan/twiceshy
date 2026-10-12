@@ -48,11 +48,13 @@ jobs:
       - name: Lint
         run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} lint
 
-      - name: Test
-        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} test
-
+      # Build before Test so the real-binary tests (P9/P11) never race two
+      # parallel test workers against one dist folder.
       - name: Build
         run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} build
+
+      - name: Test
+        run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} test
 
       - name: Check package
         run: pnpm --use-node-version=${{ steps.node-version.outputs.exact }} check:package

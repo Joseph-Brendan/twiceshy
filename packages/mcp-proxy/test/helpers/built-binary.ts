@@ -77,10 +77,12 @@ export function ensureBuilt(): void {
   }
   try {
     // Re-check under the lock: another worker may have just finished.
-    if (distIsFresh()) {
-      return;
+    if (!distIsFresh()) {
+      execSync('pnpm build', { cwd: REPO_ROOT, stdio: 'pipe' });
     }
-    execSync('pnpm build', { cwd: REPO_ROOT, stdio: 'pipe' });
+    if (!existsSync(CLI_PATH) || !existsSync(CORE_DIST)) {
+      throw new Error('the build finished without producing both dist bundles');
+    }
   } finally {
     rmSync(LOCK_DIR, { recursive: true, force: true });
   }
