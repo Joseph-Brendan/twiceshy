@@ -21,6 +21,10 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    // SQLite tests on slow CI disks (especially Windows) can exceed the 5 s
+    // default under parallel load without anything being wrong. A real hang
+    // still fails; it just gets 20 s to prove itself.
+    testTimeout: 20_000,
     // Builds both packages once, before parallel workers can race over dist.
     globalSetup: ['./vitest.global-setup.ts'],
     // X2 to X4 are real multi-process stress tests with their own script.
