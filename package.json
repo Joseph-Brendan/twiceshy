@@ -15,6 +15,7 @@
     "test:mutation": "stryker run",
     "test:pack": "node scripts/test-pack.mjs",
     "test:smoke": "node scripts/test-smoke.mjs",
+    "release:publish": "node scripts/publish-release.mjs",
     "build": "pnpm -r --filter=\"./packages/*\" run build",
     "check:package": "pnpm -r --filter=\"./packages/*\" run check:package"
   },

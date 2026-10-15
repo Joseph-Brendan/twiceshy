@@ -1,6 +1,6 @@
 {
   "name": "twiceshy",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Zero-setup repeat-action guard for AI agents",
   "keywords": [
     "mcp",

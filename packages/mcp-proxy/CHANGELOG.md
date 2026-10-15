@@ -1,5 +1,32 @@
 # @twiceshy/mcp-proxy
 
+## 0.1.2
+
+### Patch Changes
+
+- Twiceshy now works with every better-sqlite3 version from **12.11.1 upward**,
+  including future releases.
+  
+  - The core optional peer dependency and the proxy dependency are `>=12.11.1`
+    with no upper limit, so installing the driver is simply:
+  
+    ```bash
+    npm install twiceshy better-sqlite3
+    ```
+  
+    npm picks the newest version and Twiceshy checks it before opening a
+    database.
+  - A better-sqlite3 older than 12.11.1 gives a clear error right away:
+    `STORE_UNAVAILABLE` names the installed version, the required minimum, and
+    the exact command to fix it (`npm install better-sqlite3@latest`), instead
+    of failing later inside SQLite.
+  - better-sqlite3 13.x needs Node-API 10 (Node 22.14 or newer, or Node 24). On
+    older Node 22 releases, `SqliteStore` now refuses clearly and suggests
+    upgrading Node or running `npm install better-sqlite3@^12.11.1`, instead of
+    crashing inside the native addon.
+- Updated dependencies
+  - twiceshy@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes
