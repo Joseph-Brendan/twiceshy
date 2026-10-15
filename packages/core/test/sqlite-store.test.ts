@@ -199,8 +199,73 @@ describe('better-sqlite3 version support', () => {
     expect(error.fix).toContain('better-sqlite3@^12.11.1');
   });
 
+  it('rejects a version below the minimum and names the installed version, the requirement, and the fix command', () => {
+    let caught: unknown;
+    try {
+      assertBetterSqlite3Supported('11.10.0', '9');
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(StoreUnavailableError);
+    const error = caught as StoreUnavailableError;
+    expect(error.code).toBe('STORE_UNAVAILABLE');
+    expect(error.what).toContain('11.10.0');
+    expect(error.why).toContain(MIN_BETTER_SQLITE3_VERSION);
+    expect(error.fix).toContain('npm install better-sqlite3@latest');
+  });
+
+  it('compares major, minor, and patch correctly around the minimum', () => {
+    // Above the minimum in each position.
+    expect(() => assertBetterSqlite3Supported('13.0.0', '10')).not.toThrow();
+    expect(() => assertBetterSqlite3Supported('12.12.0', '10')).not.toThrow();
+    expect(() => assertBetterSqlite3Supported('12.11.2', '10')).not.toThrow();
+    // Below the minimum in each position.
+    expect(() => assertBetterSqlite3Supported('11.9.9', '9')).toThrow(StoreUnavailableError);
+    expect(() => assertBetterSqlite3Supported('12.10.9', '9')).toThrow(StoreUnavailableError);
+    expect(() => assertBetterSqlite3Supported('12.11.0', '9')).toThrow(StoreUnavailableError);
+  });
+
+  it('treats short or unparsable versions as too old instead of guessing', () => {
+    expect(() => assertBetterSqlite3Supported('13', '10')).not.toThrow();
+    expect(() => assertBetterSqlite3Supported('12.12', '10')).not.toThrow();
+    expect(() => assertBetterSqlite3Supported('0.0.0', '9')).toThrow(StoreUnavailableError);
+    expect(() => assertBetterSqlite3Supported('not-a-version', '9')).toThrow(StoreUnavailableError);
+  });
+
+  it('assumes the worst when the Node-API level is unknown', () => {
+    expect(() => assertBetterSqlite3Supported('12.11.1', undefined)).not.toThrow();
+    expect(() => assertBetterSqlite3Supported('13.0.3', undefined)).toThrow(StoreUnavailableError);
+  });
+
+  it('also refuses future majors on a Node that cannot run them', () => {
+    let caught: unknown;
+    try {
+      assertBetterSqlite3Supported('14.0.0', '9');
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(StoreUnavailableError);
+    expect((caught as StoreUnavailableError).what).toContain('14.0.0');
+  });
+
   it('reads the installed version from the package manifest', () => {
     expect(readBetterSqlite3Version()).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  it('reports a clear error when the version cannot be read', () => {
+    expect(() =>
+      readBetterSqlite3Version(() => {
+        throw new Error('missing');
+      }),
+    ).toThrow(StoreUnavailableError);
+    let caught: unknown;
+    try {
+      readBetterSqlite3Version(() => ({}));
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(StoreUnavailableError);
+    expect((caught as StoreUnavailableError).what).toContain('no version');
   });
 });
 
