@@ -1,0 +1,98 @@
+name: better-sqlite3 canary
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every Monday at 06:00 UTC, after the mutation run.
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    name: Newest better-sqlite3 on ubuntu
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.1
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # @latest can be a brand new major, which is the point of the canary.
+      - name: Install the newest better-sqlite3
+        run: |
+          pnpm --filter twiceshy add -D better-sqlite3@latest
+          pnpm --filter @twiceshy/mcp-proxy add better-sqlite3@latest
+
+      - name: Record the installed version
+        id: version
+        run: |
+          VERSION=$(node -e "console.log(require('./packages/core/node_modules/better-sqlite3/package.json').version)")
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Run gates, stress, and smoke
+        id: run
+        continue-on-error: true
+        run: |
+          {
+            echo "better-sqlite3 ${{ steps.version.outputs.value }}"
+            echo "Node $(node --version)"
+            echo
+          } > canary-output.txt
+          STATUS=0
+          run_check() {
+            echo "+ $*" >> canary-output.txt
+            "$@" >> canary-output.txt 2>&1 || STATUS=1
+          }
+          run_check pnpm build
+          run_check pnpm test
+          run_check pnpm test:stress
+          run_check pnpm test:smoke
+          echo "exit_code=$STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: Show the output
+        if: always()
+        run: cat canary-output.txt
+
+      - name: Open or update the issue
+        if: steps.run.outputs.exit_code != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="better-sqlite3 ${{ steps.version.outputs.value }} breaks Twiceshy"
+          {
+            echo "The weekly better-sqlite3 canary failed."
+            echo
+            echo "Installed: better-sqlite3 ${{ steps.version.outputs.value }}"
+            echo "Node: $(node --version)"
+            echo "Commit: ${{ github.sha }}"
+            echo
+            echo '```'
+            tail -c 20000 canary-output.txt
+            echo '```'
+          } > issue-body.md
+          NUMBER=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$NUMBER" ]; then
+            gh issue comment "$NUMBER" --body-file issue-body.md
+          else
+            gh issue create --title "$TITLE" --body-file issue-body.md
+          fi
+
+      - name: Fail when the canary fails
+        if: steps.run.outputs.exit_code != '0'
+        run: exit 1

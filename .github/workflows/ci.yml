@@ -8,13 +8,16 @@ on:
 
 jobs:
   test:
-    name: Node ${{ matrix.node-version }} on ${{ matrix.os }}
+    name: Node ${{ matrix.node-version }} on ${{ matrix.os }} (better-sqlite3 ${{ matrix.better-sqlite3 }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         node-version: [22, 24]
+        # Every supported better-sqlite3 major. 12 is the floor; 13 is latest.
+        # The weekly canary covers majors that do not exist yet.
+        better-sqlite3: ['12', '13']
 
     steps:
       - name: Configure git autocrlf
@@ -37,6 +40,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The manifests keep the universally compatible 12.x for local work; the
+      # matrix proves every major works, including 13.
+      - name: Use better-sqlite3 ${{ matrix.better-sqlite3 }}
+        run: |
+          pnpm --filter twiceshy add -D better-sqlite3@^${{ matrix.better-sqlite3 }}
+          pnpm --filter @twiceshy/mcp-proxy add better-sqlite3@^${{ matrix.better-sqlite3 }}
+
       - name: Typecheck
         run: pnpm typecheck
 
@@ -58,4 +68,6 @@ jobs:
         run: pnpm test:pack
 
       - name: Smoke test
+        env:
+          TWICESHY_SMOKE_BETTER_SQLITE3: ${{ matrix.better-sqlite3 }}
         run: pnpm test:smoke
