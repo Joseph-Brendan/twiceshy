@@ -12,8 +12,10 @@ The Kola scenario, in four lines:
 ## 30 second install and use
 
 ```bash
-npm install twiceshy
+npm install twiceshy better-sqlite3
 ```
+
+`better-sqlite3` is optional: the examples below use `MemoryStore` first, and the SQLite store later.
 
 ```js
 import { createGuard, MemoryStore } from 'twiceshy';
@@ -47,10 +49,10 @@ The second call returned the first result without running the refund again.
 
 The second call had a different `reason`, but `reason` is free text and not part of the key, so Twiceshy saw the same refund. See [Choosing keyFields](../../docs/choosing-key-fields.md).
 
-For several processes on one machine, add the optional SQLite store:
+For several processes on one machine, use the SQLite store (the optional `better-sqlite3` driver is installed by the command above; run it again any time):
 
 ```bash
-npm install better-sqlite3
+npm install twiceshy better-sqlite3
 ```
 
 ```js

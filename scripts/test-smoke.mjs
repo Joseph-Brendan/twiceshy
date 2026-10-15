@@ -124,7 +124,13 @@ try {
     )}\n`,
   );
   process.stdout.write('[test:smoke] installing the tarballs and better-sqlite3\n');
-  run('npm', ['install', coreTarball, proxyTarball, 'better-sqlite3@^12.11.1'], project);
+  // The default is the README install command word for word, with the tarballs
+  // standing in for the published packages. The CI driver matrix overrides the
+  // major with TWICESHY_SMOKE_BETTER_SQLITE3 so every supported line is tested.
+  const betterSqlite3Spec = process.env.TWICESHY_SMOKE_BETTER_SQLITE3
+    ? `better-sqlite3@^${process.env.TWICESHY_SMOKE_BETTER_SQLITE3}`
+    : 'better-sqlite3';
+  run('npm', ['install', coreTarball, proxyTarball, betterSqlite3Spec], project);
 
   const demos = join(project, 'demos');
   cpSync(DEMOS_DIR, demos, {

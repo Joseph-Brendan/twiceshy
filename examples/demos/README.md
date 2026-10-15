@@ -10,7 +10,8 @@ You need **Node 22 or newer** (`node --version`).
 
 ```bash
 npm init -y
-npm install twiceshy better-sqlite3 @twiceshy/mcp-proxy
+npm install twiceshy better-sqlite3
+npm install @twiceshy/mcp-proxy
 npm pkg set type=module
 ```
 

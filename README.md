@@ -21,8 +21,10 @@ Both packages share the same guard and the same record store. You can start with
 ## Quick start: the library
 
 ```bash
-npm install twiceshy
+npm install twiceshy better-sqlite3
 ```
+
+`better-sqlite3` is the optional SQLite driver used for records that must survive a restart; the in-memory store works without it.
 
 ```js
 import { createGuard, MemoryStore } from 'twiceshy';
