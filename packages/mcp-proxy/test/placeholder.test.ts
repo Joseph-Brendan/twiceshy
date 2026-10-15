@@ -4,7 +4,7 @@ import { isProxyAvailable, PROXY_VERSION } from '../src/index.js';
 
 describe('mcp-proxy placeholder', () => {
   it('exports version and availability', () => {
-    expect(PROXY_VERSION).toBe('0.1.0');
+    expect(PROXY_VERSION).toBe('0.1.1');
     expect(isProxyAvailable()).toBe(true);
   });
 

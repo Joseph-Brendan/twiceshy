@@ -1,5 +1,50 @@
 # @twiceshy/mcp-proxy
 
+## 0.1.1
+
+### Patch Changes
+
+- 692d12e: Twiceshy 0.1.1. Every demo from the launch guide now works from a fresh folder
+  with plain `node`, and the test suite runs the real package the way users do.
+  What changed, in plain words:
+  
+  - The SQLite crash is fixed at the cause. Demos 2, 4, 5, and 6 died with exit
+    code 139 and no message on Node 22.13. `better-sqlite3` 13.x ships binaries
+    that need Node-API 10 (Node 22.14+), and the native code segfaulted while
+    opening a database, before Twiceshy could catch anything. `SqliteStore` now
+    depends on `better-sqlite3` 12.x, whose prebuilt binaries support every Node
+    22 and Node 24 release. The old workaround that pinned the project's scripts
+    to Node 24.10.0 is removed, and the full test suite now passes on Node 22.13
+    with the shell's own `node`.
+  - `close()` is safe at any moment. It stops lease-renewal timers, cancels
+    late-completion watchers, waits for in-flight calls, renewals, and purges
+    (bounded by `closeTimeoutMs`), and only then closes the database and its
+    prepared statements. Any guard or store call after `close()` gets
+    `STORE_UNAVAILABLE`, never a crash.
+  - The CLI is easy to find. The `twiceshy` command is installed by
+    `@twiceshy/mcp-proxy`, not by the core library. Every README and guide that
+    shows a CLI command now says so and shows the no-install form,
+    `npx -y @twiceshy/mcp-proxy <command>`. The core README gained an
+    "Inspecting and resolving records" section with a working config example.
+  - The launch demos are official. `examples/demos` has one corrected, runnable
+    script per demo, a local counter server for the proxy demos, both config
+    files, and a README with the expected output. Demos 1 to 5 print a clear
+    PASS or FAIL line; demo 6 prints timings only. Demo 4 builds its proxy
+    config with absolute paths at runtime.
+  - A new `test:smoke` gate proves the packages as users receive them. It packs
+    both packages, installs only the tarballs plus `better-sqlite3` into a fresh
+    folder outside the repository, and runs the demos plus the close/shutdown
+    scenarios as plain `node` processes, repeating every SqliteStore scenario 20
+    times. It also runs `list`, `show`, and `resolve` with
+    `npx -y @twiceshy/mcp-proxy` against the database the demos created. The
+    temporary folder is deleted even on failure. `test:smoke` runs in CI on
+    Windows, macOS, and Linux on Node 22 and 24.
+  - `twiceshy show` now labels a timeout summary left on a succeeded record as
+    "(from an earlier attempt)", so a late success no longer looks like a
+    contradiction.
+- Updated dependencies [692d12e]
+  - twiceshy@0.1.1
+
 ## 0.1.0
 
 ### Minor Changes

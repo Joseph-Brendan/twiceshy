@@ -1,6 +1,6 @@
 {
   "name": "@twiceshy/mcp-proxy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP proxy with repeat-action guard",
   "keywords": [
     "mcp",
