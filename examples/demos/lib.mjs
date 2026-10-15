@@ -83,16 +83,19 @@ export function resetFiles(names) {
 }
 
 /**
- * Downloads and caches an npx package once, so a later spawn does not spend
- * the proxy's 15 s connect timeout on the download (Windows is slow at this).
+ * Runs an npx command once with stdin closed, so the package is downloaded and
+ * cached under the exact argv a later spawn will use. Servers that speak MCP
+ * over stdio exit when stdin ends, which makes this a clean warm-up: the real
+ * spawn then starts from cache instead of spending the proxy's 15 s connect
+ * timeout on the download (Windows is slow at this).
  */
-export function warmNpxPackage(name) {
-  const args = ['-y', '--package', name, '--', 'node', '-e', 'process.exit(0)'];
+export function warmNpxCommand(name, args = []) {
+  const cliArgs = ['-y', name, ...args];
   return new Promise((resolve) => {
     const child =
       process.platform === 'win32'
-        ? spawn(`npx ${args.join(' ')}`, { stdio: 'ignore', shell: true })
-        : spawn('npx', args, { stdio: 'ignore' });
+        ? spawn(`npx ${cliArgs.join(' ')}`, { stdio: ['ignore', 'ignore', 'ignore'], shell: true })
+        : spawn('npx', cliArgs, { stdio: ['ignore', 'ignore', 'ignore'] });
     child.on('error', () => resolve(false));
     child.on('close', (code) => resolve(code === 0));
   });

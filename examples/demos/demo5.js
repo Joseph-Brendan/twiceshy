@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { demoDir, pass, runCli, warmNpxPackage, writeProxyConfig } from './lib.mjs';
+import { demoDir, pass, runCli, warmNpxCommand, writeProxyConfig } from './lib.mjs';
 
 /**
  * Demo 5: doctor explains its decisions about a server it has never seen. The
@@ -8,7 +8,7 @@ import { demoDir, pass, runCli, warmNpxPackage, writeProxyConfig } from './lib.m
  * minute.
  */
 console.log('Downloading the filesystem server once (npx cache) before doctor runs...');
-const warmed = await warmNpxPackage('@modelcontextprotocol/server-filesystem');
+const warmed = await warmNpxCommand('@modelcontextprotocol/server-filesystem', [demoDir]);
 console.log(warmed ? 'Download ready.' : 'Download hit a problem; doctor will try anyway.');
 
 writeProxyConfig({
