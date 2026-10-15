@@ -22,7 +22,14 @@ import {
   StoreUnavailableError,
 } from '../src/index.js';
 import { runStoreContract } from '../src/stores/contract.js';
-import { expandHome, loadBetterSqlite3, SqliteStore } from '../src/stores/sqlite.js';
+import {
+  assertBetterSqlite3Supported,
+  expandHome,
+  loadBetterSqlite3,
+  MIN_BETTER_SQLITE3_VERSION,
+  readBetterSqlite3Version,
+  SqliteStore,
+} from '../src/stores/sqlite.js';
 
 const NOW = new Date('2026-01-01T12:00:00.000Z');
 const SETTINGS: EngineSettings = {
@@ -166,6 +173,34 @@ describe('SqliteStore opening', () => {
     const error = caught as StoreUnavailableError;
     expect(error.code).toBe('STORE_UNAVAILABLE');
     expect(error.fix).toContain('npm install better-sqlite3');
+  });
+});
+
+describe('better-sqlite3 version support', () => {
+  it('accepts the minimum version and anything newer on a modern Node', () => {
+    expect(() => assertBetterSqlite3Supported(MIN_BETTER_SQLITE3_VERSION, '10')).not.toThrow();
+    expect(() => assertBetterSqlite3Supported('13.0.3', '10')).not.toThrow();
+    expect(() => assertBetterSqlite3Supported('14.2.0', '10')).not.toThrow();
+  });
+
+  it('explains the Node-API 10 requirement of 13.x on Node 22 before 22.14', () => {
+    let caught: unknown;
+    try {
+      assertBetterSqlite3Supported('13.0.3', '9');
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(StoreUnavailableError);
+    const error = caught as StoreUnavailableError;
+    expect(error.code).toBe('STORE_UNAVAILABLE');
+    expect(error.what).toContain('13.0.3');
+    expect(error.why).toContain('Node-API 10');
+    expect(error.why).toContain('22.14');
+    expect(error.fix).toContain('better-sqlite3@^12.11.1');
+  });
+
+  it('reads the installed version from the package manifest', () => {
+    expect(readBetterSqlite3Version()).toMatch(/^\d+\.\d+\.\d+/);
   });
 });
 

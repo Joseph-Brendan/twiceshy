@@ -37,6 +37,13 @@ export interface SqliteStoreOptions {
 const nodeRequire = createRequire(import.meta.url);
 
 /**
+ * The lowest better-sqlite3 version Twiceshy supports: every 12.x release
+ * from this one up has ready-made binaries for Node 22 and Node 24 on
+ * Windows, macOS, and Linux (C20 rule 24).
+ */
+export const MIN_BETTER_SQLITE3_VERSION = '12.11.1';
+
+/**
  * Loads better-sqlite3. The optional dependency is required lazily so the
  * core package keeps working for users who never touch SqliteStore.
  * `requireFn` is injectable for tests.
@@ -54,6 +61,83 @@ export function loadBetterSqlite3(
       cause,
     });
   }
+}
+
+/** Reads the installed better-sqlite3 version. `requireFn` is injectable for tests. */
+export function readBetterSqlite3Version(requireFn: (id: string) => unknown = nodeRequire): string {
+  try {
+    const manifest = requireFn('better-sqlite3/package.json') as { version?: unknown };
+    if (typeof manifest.version === 'string' && manifest.version.length > 0) {
+      return manifest.version;
+    }
+  } catch (cause) {
+    throw new StoreUnavailableError({
+      what: 'Twiceshy could not read the installed better-sqlite3 version.',
+      why: `The package manifest could not be loaded: ${String(cause)}`,
+      fix: 'Run "npm install better-sqlite3@latest" (or "pnpm add better-sqlite3@latest"), then try again.',
+      cause,
+    });
+  }
+  throw new StoreUnavailableError({
+    what: 'The installed better-sqlite3 package has no version.',
+    why: 'The package manifest did not contain a version string.',
+    fix: 'Run "npm install better-sqlite3@latest" (or "pnpm add better-sqlite3@latest"), then try again.',
+  });
+}
+
+/**
+ * The one place where better-sqlite3 versions behave differently.
+ *
+ * - 12.x and older call prebuild-install for ABI-specific binaries. Every
+ *   published 12.x from 12.1.0 up has binaries for Node 22 and Node 24 on
+ *   Windows, macOS, and Linux, so 12.11.1 is the support floor.
+ * - 13.x is the first N-API line. Its bundled binary needs Node-API 10,
+ *   which Node 22 provides only from 22.14.0 (Node 24 has it). On Node
+ *   22.0-22.13 the addon crashes inside native code while opening a
+ *   database, before JavaScript can catch anything, so the only safe
+ *   handling is to refuse before the driver is used.
+ */
+export function assertBetterSqlite3Supported(
+  version: string,
+  napiVersion: string | number | undefined,
+): void {
+  const parsed = parseVersion(version);
+  if (!isAtLeast(parsed, parseVersion(MIN_BETTER_SQLITE3_VERSION))) {
+    throw new StoreUnavailableError({
+      what: `The installed better-sqlite3 version ${version} is too old for Twiceshy.`,
+      why: `Twiceshy needs better-sqlite3 ${MIN_BETTER_SQLITE3_VERSION} or newer; older releases cannot open the action database safely.`,
+      fix: 'Run "npm install better-sqlite3@latest" (or "pnpm add better-sqlite3@latest"), then try again.',
+    });
+  }
+  const napi = Number(napiVersion ?? 0);
+  if (parsed[0] >= 13 && napi < 10) {
+    throw new StoreUnavailableError({
+      what: `better-sqlite3 ${version} cannot run on this Node version.`,
+      why: `better-sqlite3 13.x and newer need Node-API 10, and this Node provides Node-API ${String(napiVersion ?? 'unknown')}. Node-API 10 first ships in Node 22.14.0; Node 24 has it.`,
+      fix: 'Upgrade to Node 22.14 or newer (Node 24 recommended), or run "npm install better-sqlite3@^12.11.1" to use the 12.x driver on this Node.',
+    });
+  }
+}
+
+type VersionParts = readonly [number, number, number];
+
+function parseVersion(version: string): VersionParts {
+  const [major = '0', minor = '0', patch = '0'] = version.split('.');
+  return [
+    Number.parseInt(major, 10) || 0,
+    Number.parseInt(minor, 10) || 0,
+    Number.parseInt(patch, 10) || 0,
+  ];
+}
+
+function isAtLeast(candidate: VersionParts, minimum: VersionParts): boolean {
+  if (candidate[0] !== minimum[0]) {
+    return candidate[0] > minimum[0];
+  }
+  if (candidate[1] !== minimum[1]) {
+    return candidate[1] > minimum[1];
+  }
+  return candidate[2] >= minimum[2];
 }
 
 /** Expands a leading "~" to the home folder on every operating system. */
@@ -405,6 +489,9 @@ export class SqliteStore implements ActionStore {
 
   constructor(options: SqliteStoreOptions) {
     const Database = loadBetterSqlite3();
+    // Check before opening: on an incompatible runtime the native addon
+    // crashes while opening the file, and JavaScript cannot catch that.
+    assertBetterSqlite3Supported(readBetterSqlite3Version(), process.versions.napi);
     this.path = resolve(expandHome(options.path));
     this.db = openDatabase(Database, this.path);
   }
